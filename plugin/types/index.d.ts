@@ -37,6 +37,22 @@ export type TranscriptLine = {
   who: 'user' | 'claude' | 'system'
   text: string
   interrupted?: boolean
+  /** The person typed this instead of saying it. */
+  typed?: boolean
+}
+
+/** What one voice session cost, estimated from the provider's usage and the config's prices. */
+export type VoiceSessionCost = {
+  endedAt: number
+  reason: string
+  durationMs: number
+  costUsd: number
+  /** Claude's speech: the realtime model's audio output and its instructions. */
+  speechUsd: number
+  /** Transcribing the person's speech. */
+  transcriptionUsd: number
+  spokenMs: number
+  heardMs: number
 }
 
 export type VoiceStateV1 = {
@@ -48,8 +64,15 @@ export type VoiceStateV1 = {
   provider: string
   model: string
   sessionStartedAt?: number
+  /** The voice session in progress (0 when none). */
   estimatedCostUsd: number
+  lastSession?: VoiceSessionCost
+  /** Every voice session today and this month, the one in progress included. */
+  todayCostUsd?: number
+  monthCostUsd?: number
   queuedUtterances: number
+  /** The words being heard right now, before the utterance is finished. */
+  partial?: string
   warning?: string
   error?: string
   transcript: TranscriptLine[]
@@ -59,7 +82,8 @@ export type VoiceStateV1 = {
 /** What `voice_status` answers when the caller already holds `sinceRev`. */
 export type VoiceStateUnchanged = { v: 1; rev: number; unchanged: true }
 
-export type VoiceControlAction = 'mute' | 'unmute' | 'skip' | 'end'
+/** `type` delivers text the person typed as their answer (with `text`). */
+export type VoiceControlAction = 'mute' | 'unmute' | 'skip' | 'end' | 'type'
 
 /** Whether the map pane can reach the bridge's MCP server. */
 export type BridgeLink = {

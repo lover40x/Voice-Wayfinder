@@ -40539,10 +40539,14 @@ ${text2}`).digest("hex")}.pcm`);
 };
 
 // bridge/src/log.ts
-import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
+import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 var SECRET = /\b(sk-[A-Za-z0-9_-]{12,}|0\.[0-9a-f-]{20,}\.[A-Za-z0-9+/=:]{20,})/g;
 var redact = (text2) => text2.replace(SECRET, "[redacted]");
+var localDay = (at) => {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 var TranscriptLog = class {
   file;
   dir;
@@ -40550,8 +40554,7 @@ var TranscriptLog = class {
     this.dir = dir;
   }
   begin(sessionId, meta3) {
-    const day = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-    const folder = join3(this.dir, day);
+    const folder = join3(this.dir, localDay(Date.now()));
     mkdirSync2(folder, { recursive: true });
     this.file = join3(folder, `${sessionId}.jsonl`);
     this.append({ kind: "session", sessionId, ...meta3, at: Date.now() });
@@ -40563,9 +40566,35 @@ var TranscriptLog = class {
   timing(record2) {
     this.append({ kind: "timing", ...record2, at: Date.now() });
   }
-  end(reason) {
-    this.append({ kind: "end", reason, at: Date.now() });
+  end(reason, cost) {
+    this.append({ kind: "end", reason, ...cost, at: Date.now() });
     this.file = void 0;
+  }
+  /** Estimated spend of the sessions logged so far today and this month (local time). */
+  totals(now) {
+    const today = localDay(now);
+    const month = today.slice(0, 7);
+    let todayUsd = 0;
+    let monthUsd = 0;
+    if (!existsSync3(this.dir)) return { todayUsd, monthUsd };
+    const n = new Date(now);
+    const from = localDay(new Date(n.getFullYear(), n.getMonth(), 0).getTime());
+    for (const day of readdirSync(this.dir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && d >= from && d <= today)) {
+      for (const f of readdirSync(join3(this.dir, day)).filter((f2) => f2.endsWith(".jsonl"))) {
+        for (const raw of readFileSync3(join3(this.dir, day, f), "utf8").split("\n")) {
+          if (!raw.includes('"kind":"end"')) continue;
+          try {
+            const r = JSON.parse(raw);
+            if (r.kind !== "end" || typeof r.costUsd !== "number" || typeof r.at !== "number") continue;
+            const d = localDay(r.at);
+            if (d.slice(0, 7) === month) monthUsd += r.costUsd;
+            if (d === today) todayUsd += r.costUsd;
+          } catch {
+          }
+        }
+      }
+    }
+    return { todayUsd, monthUsd };
   }
   get path() {
     return this.file;
@@ -40783,6 +40812,7 @@ ${text2}
           const textIn = u.input_tokens ?? 0;
           this.emit({
             type: "usage",
+            kind: "speech",
             costUsd: (textIn * pricing.textInPerMTok + audioOut * pricing.audioOutPerMTok + textOut * pricing.textOutPerMTok) / 1e6
           });
         }
@@ -40804,12 +40834,15 @@ ${text2}
         return;
       case "input_audio_buffer.speech_stopped": {
         const durationMs = this.speechStartMs !== void 0 && msg.audio_end_ms !== void 0 ? msg.audio_end_ms - this.speechStartMs : void 0;
-        if (durationMs) this.emit({ type: "usage", costUsd: durationMs / 6e4 * pricing.transcriptionPerMin });
+        if (durationMs) this.emit({ type: "usage", kind: "transcription", costUsd: durationMs / 6e4 * pricing.transcriptionPerMin });
         this.emit({ type: "user.speech_stopped", itemId: msg.item_id, durationMs });
         return;
       }
       case "input_audio_buffer.committed":
         if (msg.item_id) this.emit({ type: "user.transcript_pending", itemId: msg.item_id });
+        return;
+      case "conversation.item.input_audio_transcription.delta":
+        if (msg.item_id && msg.delta) this.emit({ type: "user.transcript_delta", itemId: msg.item_id, delta: msg.delta });
         return;
       case "conversation.item.input_audio_transcription.completed":
         this.emit({ type: "user.transcript", itemId: msg.item_id ?? "", text: msg.transcript ?? "" });
@@ -40842,6 +40875,10 @@ var PROTOCOL_VERSION = 1;
 // bridge/src/session.ts
 var BYTES_PER_MS = 48;
 var MAX_LINES = 200;
+var round = (usdValue) => Math.round(usdValue * 1e3) / 1e3;
+var usd = (n) => n > 0 && n < 5e-3 ? "<$0.01" : `$${n.toFixed(2)}`;
+var minutes = (ms) => ms < 6e4 ? `${Math.max(1, Math.round(ms / 1e3))} s` : `${(ms / 6e4).toFixed(1)} min`;
+var describeCost = (c) => `${minutes(c.durationMs)}, ${usd(c.costUsd)} (Claude's speech ${usd(c.speechUsd)} for ${minutes(c.spokenMs)}, transcription ${usd(c.transcriptionUsd)} for ${minutes(c.heardMs)})`;
 var VoiceSession = class {
   provider;
   audio;
@@ -40858,7 +40895,12 @@ var VoiceSession = class {
   nextLineId = 1;
   map;
   rev = 1;
-  cost = 0;
+  spend = { speech: 0, transcription: 0 };
+  spokenMs = 0;
+  heardMs = 0;
+  lastSession;
+  /** Spend of sessions already ended today and this month, read from the log. */
+  history;
   startedAt;
   lastActivityAt = 0;
   warning;
@@ -40869,6 +40911,7 @@ var VoiceSession = class {
   audioRestarts = [];
   bargeInTimer;
   heard = /* @__PURE__ */ new Map();
+  partials = /* @__PURE__ */ new Map();
   lastReplyAt;
   clipSeq;
   lastAck;
@@ -40906,6 +40949,7 @@ var VoiceSession = class {
           this.speech = void 0;
           signal?.removeEventListener("abort", onAbort);
           if (status !== "completed") this.markLine(speech.lineId, { interrupted: true });
+          this.spokenMs += Math.round(speech.playedBytes / BYTES_PER_MS);
           this.deps.log?.timing({
             what: "speech",
             status,
@@ -40966,30 +41010,52 @@ var VoiceSession = class {
     }
     return { heardBefore, answers, unasked: [] };
   }
-  control(action) {
+  control(action, text2 = "") {
+    const done = (message, accepted = true) => ({ message, accepted });
     switch (action) {
       case "mute":
         this.muted = true;
         this.userSpeaking = false;
         this.provider?.clearInput();
         this.touch();
-        return "Microphone muted.";
+        return done("Microphone muted.");
       case "unmute":
         this.muted = false;
         this.touch();
-        return "Microphone on.";
+        return done("Microphone on.");
       case "skip":
-        if (!this.speech && !this.awaiting) return "Nothing to skip.";
+        if (!this.speech && !this.awaiting) return done("Nothing to skip.", false);
         this.skipRequested = true;
         if (this.speech) this.stopSpeech("skipped");
         this.touch();
-        return "Question skipped.";
-      case "end":
+        return done("Question skipped.");
+      case "end": {
         this.endRequested = true;
         if (this.speech) this.stopSpeech("ended");
+        const wasOn = !!this.provider;
         this.disconnect("Voice session ended.");
-        return "Voice session ended.";
+        if (!wasOn || !this.lastSession) return done("Voice session ended.");
+        const t = this.totals();
+        return done(
+          `Voice session ended. OpenAI est. this session: ${describeCost(this.lastSession)}. Today ${usd(t.todayCostUsd ?? 0)}, this month ${usd(t.monthCostUsd ?? 0)}.`
+        );
+      }
+      case "type":
+        return this.typed(text2) ? done("Typed reply delivered as the answer.") : done("No voice question is in progress, so the text was not taken as an answer.", false);
     }
+  }
+  /**
+   * Takes what the person typed as their answer, while a question is being
+   * spoken or awaited. Typing over Claude stops its speech, as speaking would.
+   */
+  typed(text2) {
+    const t = text2.trim();
+    if (!t || !this.provider || !this.speech && !this.awaiting) return false;
+    if (this.speech) this.stopSpeech("interrupted");
+    this.queue.push({ text: t, at: this.now(), typed: true });
+    this.addLine("user", t, { typed: true });
+    this.touch();
+    return true;
   }
   updateMap(patch) {
     const base = this.map ?? { decided: [], blocked: [], fog: [], updatedAt: 0 };
@@ -41009,8 +41075,11 @@ var VoiceSession = class {
       provider: this.provider?.name ?? "openai-realtime",
       model: this.provider?.model ?? "",
       sessionStartedAt: this.startedAt,
-      estimatedCostUsd: Math.round(this.cost * 1e3) / 1e3,
+      estimatedCostUsd: round(this.currentCost()),
+      lastSession: this.lastSession,
+      ...this.totals(),
       queuedUtterances: this.queue.length,
+      partial: [...this.partials.values()].join(" ").trim() || void 0,
       warning: this.warning,
       error: this.error,
       transcript: this.lines.slice(-40),
@@ -41020,8 +41089,11 @@ var VoiceSession = class {
   summary() {
     const s = this.state();
     const parts = [s.activity];
-    if (s.sessionStartedAt) parts.push(`connected ${Math.round((this.now() - s.sessionStartedAt) / 6e4)} min`);
-    parts.push(`est. $${s.estimatedCostUsd.toFixed(2)} this session`);
+    if (s.sessionStartedAt) {
+      parts.push(`connected ${Math.round((this.now() - s.sessionStartedAt) / 6e4)} min`);
+      parts.push(`est. ${usd(s.estimatedCostUsd)} so far`);
+    } else if (s.lastSession) parts.push(`last voice session: ${describeCost(s.lastSession)}`);
+    if (s.todayCostUsd !== void 0) parts.push(`OpenAI est. today ${usd(s.todayCostUsd)}, this month ${usd(s.monthCostUsd ?? 0)}`);
     if (s.queuedUtterances) parts.push(`${s.queuedUtterances} unheard utterance(s) waiting: call voice_listen`);
     if (s.muted) parts.push("mic muted");
     if (s.error) parts.push(`error: ${s.error}`);
@@ -41072,6 +41144,9 @@ var VoiceSession = class {
     }
     this.provider = provider;
     this.audio = audio;
+    this.spend = { speech: 0, transcription: 0 };
+    this.spokenMs = 0;
+    this.heardMs = 0;
     this.startedAt = this.now();
     this.lastActivityAt = this.now();
     this.deps.log?.begin(randomUUID(), { provider: provider.name, model: provider.model });
@@ -41093,9 +41168,37 @@ var VoiceSession = class {
     audio?.stop();
     this.userSpeaking = false;
     this.pending.clear();
+    this.partials.clear();
+    const cost = {
+      endedAt: this.now(),
+      reason,
+      durationMs: this.startedAt === void 0 ? 0 : this.now() - this.startedAt,
+      costUsd: round(this.currentCost()),
+      speechUsd: round(this.spend.speech),
+      transcriptionUsd: round(this.spend.transcription),
+      spokenMs: this.spokenMs,
+      heardMs: this.heardMs
+    };
     this.startedAt = void 0;
-    this.addLine("system", reason);
-    this.deps.log?.end(reason);
+    this.lastSession = cost;
+    this.spend = { speech: 0, transcription: 0 };
+    this.addLine("system", `${reason} OpenAI est.: ${describeCost(cost)}.`);
+    this.deps.log?.end(reason, cost);
+    this.history = void 0;
+  }
+  currentCost() {
+    return this.spend.speech + this.spend.transcription;
+  }
+  /** Today's and this month's spend: ended sessions from the log, plus the one in progress. */
+  totals() {
+    const log = this.deps.log;
+    if (!log) return {};
+    const day = localDay(this.now());
+    if (this.history?.day !== day) {
+      const t = log.totals(this.now());
+      this.history = { day, ...t };
+    }
+    return { todayCostUsd: round(this.history.todayUsd + this.currentCost()), monthCostUsd: round(this.history.monthUsd + this.currentCost()) };
   }
   maintain() {
     if (!this.provider || this.speech || this.awaiting || this.userSpeaking) return;
@@ -41136,14 +41239,20 @@ var VoiceSession = class {
         this.userSpeaking = false;
         clearTimeout(this.bargeInTimer);
         if (e.itemId) this.heard.set(e.itemId, { durationMs: e.durationMs, stoppedAt: this.now() });
+        this.heardMs += e.durationMs ?? 0;
         this.touch();
         return;
       case "user.transcript_pending":
         this.pending.add(e.itemId);
         this.changed();
         return;
+      case "user.transcript_delta":
+        this.partials.set(e.itemId, (this.partials.get(e.itemId) ?? "") + e.delta);
+        this.changed();
+        return;
       case "user.transcript": {
         this.pending.delete(e.itemId);
+        this.partials.delete(e.itemId);
         const heard = this.heard.get(e.itemId);
         this.heard.delete(e.itemId);
         const durationMs = heard?.durationMs;
@@ -41159,11 +41268,12 @@ var VoiceSession = class {
       }
       case "user.transcript_failed":
         this.pending.delete(e.itemId);
+        this.partials.delete(e.itemId);
         this.warning = `Could not transcribe one utterance: ${e.message}`;
         this.changed();
         return;
       case "usage":
-        this.cost += e.costUsd;
+        this.spend[e.kind] += e.costUsd;
         this.changed();
         return;
       case "warning":
@@ -41283,7 +41393,8 @@ var VoiceSession = class {
     const parts = [];
     const deadline = this.now() + timeoutMs;
     let lastHeardAt = this.now();
-    const result = (status) => ({ status, text: parts.join(" "), parts });
+    let typed = false;
+    const result = (status) => ({ status, text: parts.join(" "), parts, ...typed ? { typed } : {} });
     try {
       for (; ; ) {
         if (signal?.aborted) return result("cancelled");
@@ -41294,12 +41405,15 @@ var VoiceSession = class {
         }
         if (!this.provider && !this.connecting) return result("disconnected");
         while (this.queue.length) {
-          parts.push(this.queue.shift().text);
+          const u = this.queue.shift();
+          parts.push(u.text);
+          typed ||= !!u.typed;
           lastHeardAt = this.now();
         }
         const busy = this.userSpeaking || this.pending.size > 0;
         if (busy) lastHeardAt = this.now();
-        if (parts.length && !busy && this.now() - lastHeardAt >= this.deps.endOfReplyMs) {
+        const quietEnough = typed || this.now() - lastHeardAt >= this.deps.endOfReplyMs;
+        if (parts.length && !busy && quietEnough) {
           this.lastReplyAt = this.now();
           this.acknowledge();
           return result("replied");
@@ -41326,8 +41440,8 @@ var VoiceSession = class {
     const fromTitles = titles.flatMap((t) => t.match(/[A-Za-z][A-Za-z0-9.+#_-]{2,}/g) ?? []);
     return [.../* @__PURE__ */ new Set([...this.deps.baseVocabulary, ...fromTitles])];
   }
-  addLine(who, text2) {
-    const line = { id: this.nextLineId++, at: this.now(), who, text: text2 };
+  addLine(who, text2, extra = {}) {
+    const line = { ...extra, id: this.nextLineId++, at: this.now(), who, text: text2 };
     this.lines.push(line);
     if (this.lines.length > MAX_LINES) this.lines.splice(0, this.lines.length - MAX_LINES);
     this.deps.log?.line(line);
@@ -41442,7 +41556,7 @@ var describeSay = (r) => {
 var describeReply = (r) => {
   switch (r.status) {
     case "replied":
-      return `The person said (Thai speech, transcribed; English terms may be misheard): ${r.text}`;
+      return r.typed ? `The person answered (typed, at least in part, so take the words as written): ${r.text}` : `The person said (Thai speech, transcribed; English terms may be misheard): ${r.text}`;
     case "timeout":
       return "No reply before the timeout. Ask again briefly, or call voice_listen to keep waiting.";
     case "skipped":
@@ -41567,10 +41681,16 @@ server.registerTool(
   "voice_control",
   {
     title: "Voice control",
-    description: "Mute or unmute the microphone, skip the current question, or end the voice session. The map pane buttons call this too.",
-    inputSchema: { action: external_exports.enum(["mute", "unmute", "skip", "end"]) }
+    description: 'Mute or unmute the microphone, skip the current question, or end the voice session. The map pane buttons call this too, and the pane uses "type" to hand over what the person typed as their answer; you never need "type".',
+    inputSchema: {
+      action: external_exports.enum(["mute", "unmute", "skip", "end", "type"]),
+      text: external_exports.string().max(4e3).optional().describe('With "type": what the person typed.')
+    }
   },
-  async ({ action }) => text(session.control(action))
+  async ({ action, text: typed }) => {
+    const r = session.control(action, typed);
+    return text(r.message, r);
+  }
 );
 process.on("SIGTERM", () => {
   session.shutdown();

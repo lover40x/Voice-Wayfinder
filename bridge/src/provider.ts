@@ -9,9 +9,10 @@ export type ProviderEvent =
   | { type: 'user.speech_started' }
   | { type: 'user.speech_stopped'; itemId?: string; durationMs?: number }
   | { type: 'user.transcript_pending'; itemId: string }
+  | { type: 'user.transcript_delta'; itemId: string; delta: string }
   | { type: 'user.transcript'; itemId: string; text: string }
   | { type: 'user.transcript_failed'; itemId: string; message: string }
-  | { type: 'usage'; costUsd: number }
+  | { type: 'usage'; costUsd: number; kind: 'speech' | 'transcription' }
   | { type: 'warning'; message: string }
   | { type: 'closed'; reason: string; isExpected: boolean }
 

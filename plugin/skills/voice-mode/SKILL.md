@@ -27,7 +27,7 @@ You stay the brain. The realtime voice model behind the `voice_*` tools is only 
 Every second you spend between their reply and your next question is dead air for them.
 
 - Call the next `voice_*` tool as soon as you know what to say. Send tracker writes, file reads or note-taking in the same message as that call (parallel tool calls), not in turns of their own before it.
-- Write on screen only what they must see (options, a table, a link), and keep it short. Don't type out what you are about to say.
+- The person reads along as they listen: put every line you speak on screen too, as plain text in the same message as the voice call (for a `voice_interview` round, the round's questions). Keep extras (options, a table, a link) short.
 - Keep each spoken turn to one sentence of about 15 words where you can; two at most.
 
 ## Hearing
@@ -35,6 +35,7 @@ Every second you spend between their reply and your next question is dead air fo
 - Transcripts are Thai speech recognition with English mixed in; terms can be misheard. When an answer contains a term that will land in the tracker (a ticket name, a product, an API), repeat it back in your confirmation.
 - When `voice_say` or `voice_converse` reports an interruption, stop the point you were making. What the person said is the new input; answer that.
 - `heardBefore` in a result is something the person said while you were working. Take it into account before acting on the reply.
+- The person may type instead of speaking at any moment. Typed during a question, it comes back as the reply, marked typed: take its words as written, with no need to repeat terms back. Typed while you are working, it arrives as a normal message: treat it as their answer or new input, as you would a spoken one, and stay in voice mode.
 
 ## Deciding
 
@@ -63,3 +64,5 @@ Send only the fields that changed. Ticket titles stay in English.
 ## Ending
 
 When the session's ticket is resolved, or the person says to stop, say a one-line Thai summary with `voice_say`, then call `voice_control` with `end` so the realtime session stops costing money.
+
+Every time a voice session ends, write its estimated OpenAI cost on screen in one line, from the `voice_control` result: this session (minutes, total, speech and transcription), today and this month. When it ended without you (idle disconnect, the person's End button, a refresh), take the same line from `voice_status` the next time you write. Say it is an estimate; the real bill is on OpenAI's usage page.

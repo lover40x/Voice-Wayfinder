@@ -8,6 +8,7 @@ export type {
   TranscriptLine,
   VoiceActivity,
   VoiceControlAction,
+  VoiceSessionCost,
   VoiceStateUnchanged,
   VoiceStateV1,
 } from '../types/index.js'

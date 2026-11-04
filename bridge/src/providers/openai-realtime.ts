@@ -224,6 +224,7 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
           const textIn = u.input_tokens ?? 0
           this.emit({
             type: 'usage',
+            kind: 'speech',
             costUsd: (textIn * pricing.textInPerMTok + audioOut * pricing.audioOutPerMTok + textOut * pricing.textOutPerMTok) / 1e6,
           })
         }
@@ -245,12 +246,15 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
         return
       case 'input_audio_buffer.speech_stopped': {
         const durationMs = this.speechStartMs !== undefined && msg.audio_end_ms !== undefined ? msg.audio_end_ms - this.speechStartMs : undefined
-        if (durationMs) this.emit({ type: 'usage', costUsd: (durationMs / 60000) * pricing.transcriptionPerMin })
+        if (durationMs) this.emit({ type: 'usage', kind: 'transcription', costUsd: (durationMs / 60000) * pricing.transcriptionPerMin })
         this.emit({ type: 'user.speech_stopped', itemId: msg.item_id, durationMs })
         return
       }
       case 'input_audio_buffer.committed':
         if (msg.item_id) this.emit({ type: 'user.transcript_pending', itemId: msg.item_id })
+        return
+      case 'conversation.item.input_audio_transcription.delta':
+        if (msg.item_id && msg.delta) this.emit({ type: 'user.transcript_delta', itemId: msg.item_id, delta: msg.delta })
         return
       case 'conversation.item.input_audio_transcription.completed':
         this.emit({ type: 'user.transcript', itemId: msg.item_id ?? '', text: msg.transcript ?? '' })

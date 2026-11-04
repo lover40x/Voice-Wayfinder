@@ -12,6 +12,15 @@ All notable changes to the voice-wayfinder plugin. Versions follow semantic vers
 - Map pane mod (`/voice-map`): voice status, current ticket, decided / blocked / fog, live transcript, mute / skip / end buttons. Protocol v1.
 - Secrets through Bitwarden Secrets Manager (`bws run`), access token in the macOS Keychain.
 
+### Added after the first live tests
+
+- Faster turns: speech at speed 1.2 with brisk-pace instructions; 0.5 s VAD silence and a 0.9 s end-of-reply window; per-turn timings in the log (first audio, transcription, Claude's gap).
+- Instant acknowledgement ("ค่ะ") the moment a reply is complete and a thinking cue after 4 s, from clips rendered once and cached on disk.
+- `voice_interview`: a whole grilling round asked back to back, with no wait on Claude between questions.
+- Read along: Claude writes each spoken line on screen; the pane's Now box shows the current question and the words being heard live.
+- Type to answer: Enter in the chat box during a voice question hands the text to the bridge as the answer (and stops Claude's speech); otherwise it goes to the chat as usual.
+- Cost summary at every voice session end (duration, speech and transcription), plus today's and this month's totals from the local logs, in the transcript, the pane and `voice_status`. Log folders are named by local date.
+
 ### Fixed during the first live test
 
 - The launcher quotes paths for `bws run`, which joins its arguments into one shell string (the plugin folder has a space).

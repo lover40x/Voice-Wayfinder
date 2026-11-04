@@ -110,7 +110,7 @@ A new OpenAI model is a config change; a new provider is one new adapter impleme
 
 ## Cost
 
-The realtime model only speaks (it never answers on its own), so you pay mainly for spoken output (about $0.08 per minute of Claude's speech on `gpt-realtime-2.1`, about a third of that on `-mini`) plus transcription of your speech ($0.006 per minute on `gpt-4o-transcribe`). The pane shows a running estimate. The bridge disconnects after 10 idle minutes and refreshes the session before OpenAI's 60-minute limit; it reconnects on the next question.
+The realtime model only speaks (it never answers on its own), so you pay mainly for spoken output (about $0.08 per minute of Claude's speech on `gpt-realtime-2.1`, about a third of that on `-mini`) plus transcription of your speech ($0.006 per minute on `gpt-4o-transcribe`). The pane shows a running estimate, and every voice session ends with a summary (minutes, Claude's speech, transcription) plus today's and this month's totals, added up from the local logs. These are estimates from the usage OpenAI reports and the prices in the config; the real bill is on OpenAI's usage page. The bridge disconnects after 10 idle minutes and refreshes the session before OpenAI's 60-minute limit; it reconnects on the next question.
 
 ## Transcripts
 

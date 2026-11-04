@@ -101,7 +101,9 @@ const describeSay = (r: SayResult) => {
 const describeReply = (r: ReplyResult) => {
   switch (r.status) {
     case 'replied':
-      return `The person said (Thai speech, transcribed; English terms may be misheard): ${r.text}`
+      return r.typed
+        ? `The person answered (typed, at least in part, so take the words as written): ${r.text}`
+        : `The person said (Thai speech, transcribed; English terms may be misheard): ${r.text}`
     case 'timeout':
       return 'No reply before the timeout. Ask again briefly, or call voice_listen to keep waiting.'
     case 'skipped':
@@ -246,10 +248,17 @@ server.registerTool(
   'voice_control',
   {
     title: 'Voice control',
-    description: 'Mute or unmute the microphone, skip the current question, or end the voice session. The map pane buttons call this too.',
-    inputSchema: { action: z.enum(['mute', 'unmute', 'skip', 'end']) },
+    description:
+      'Mute or unmute the microphone, skip the current question, or end the voice session. The map pane buttons call this too, and the pane uses "type" to hand over what the person typed as their answer; you never need "type".',
+    inputSchema: {
+      action: z.enum(['mute', 'unmute', 'skip', 'end', 'type']),
+      text: z.string().max(4000).optional().describe('With "type": what the person typed.'),
+    },
   },
-  async ({ action }) => text(session.control(action)),
+  async ({ action, text: typed }) => {
+    const r = session.control(action, typed)
+    return text(r.message, r)
+  },
 )
 
 process.on('SIGTERM', () => {

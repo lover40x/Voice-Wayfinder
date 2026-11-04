@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 import type { VoiceStateV1 } from '../../plugin/shared/protocol.ts'
 import type { AudioDevice, AudioEvent } from '../src/audio.ts'
 import { ClipCache } from '../src/clips.ts'
+import { localDay, TranscriptLog } from '../src/log.ts'
 import type { ProviderEvent, VoiceProvider } from '../src/provider.ts'
 import { VoiceSession } from '../src/session.ts'
 
@@ -293,7 +297,7 @@ test('skip from the pane ends the wait without an answer', async () => {
   const { session } = setup()
   const reply = session.listen(5000)
   await tick()
-  assert.equal(session.control('skip'), 'Question skipped.')
+  assert.equal(session.control('skip').message, 'Question skipped.')
   assert.equal((await reply).status, 'skipped')
 })
 
@@ -362,6 +366,93 @@ test('ticket titles teach the recogniser their terms', async () => {
   session.updateMap({ current: { title: 'Pick Supabase or Postgres RLS' } })
   assert.ok(provider.vocabulary.includes('Supabase'))
   assert.ok(provider.vocabulary.includes('RLS'))
+})
+
+test('a typed answer while listening returns at once, marked as typed', async () => {
+  const { session } = setup({ endOfReplyMs: 5000 })
+  const reply = session.listen(5000)
+  await tick()
+  assert.equal(session.control('type', 'ใช้ Supabase ครับ').accepted, true)
+  const r = await reply
+  assert.equal(r.status, 'replied')
+  assert.equal(r.text, 'ใช้ Supabase ครับ')
+  assert.equal(r.typed, true)
+  const line = (session.state() as VoiceStateV1).transcript.at(-1)
+  assert.deepEqual([line?.who, line?.typed], ['user', true])
+})
+
+test('typing over Claude stops its speech and becomes the reply', async () => {
+  const { provider, audio, session } = setup()
+  const turn = session.converse('คำถามยาวๆ', 5000)
+  await tick()
+  provider.emit({ type: 'speech.audio', speechId: 's1', pcm: Buffer.alloc(4800) })
+  session.control('type', 'ข้ามไปเลย')
+  const r = await turn
+  assert.equal(r.said.status, 'interrupted')
+  assert.equal(audio.flushes, 1)
+  assert.equal(r.reply.text, 'ข้ามไปเลย')
+})
+
+test('typing while no question is in progress is not taken as an answer', async () => {
+  const { session } = setup()
+  assert.equal(session.control('type', 'สวัสดี').accepted, false)
+})
+
+test('the words being heard show in the state until the utterance is done', async () => {
+  const { provider, session } = setup()
+  void session.listen(5000)
+  await tick()
+  provider.emit({ type: 'user.speech_started' })
+  provider.emit({ type: 'user.transcript_delta', itemId: 'p', delta: 'กำลัง' })
+  provider.emit({ type: 'user.transcript_delta', itemId: 'p', delta: 'พูด' })
+  assert.equal((session.state() as VoiceStateV1).partial, 'กำลังพูด')
+  provider.emit({ type: 'user.speech_stopped', itemId: 'p' })
+  provider.emit({ type: 'user.transcript', itemId: 'p', text: 'กำลังพูดอยู่' })
+  assert.equal((session.state() as VoiceStateV1).partial, undefined)
+})
+
+test('ending a session summarises its OpenAI cost by kind', async () => {
+  const { provider, session } = setup()
+  void session.listen(5000)
+  await tick()
+  provider.emit({ type: 'usage', kind: 'speech', costUsd: 0.02 })
+  provider.emit({ type: 'usage', kind: 'transcription', costUsd: 0.003 })
+  assert.equal((session.state() as VoiceStateV1).estimatedCostUsd, 0.023)
+  const { message } = session.control('end')
+  assert.match(message, /this session: .*\$0\.02 \(Claude's speech \$0\.02 .* transcription <\$0\.01/)
+  const s = session.state() as VoiceStateV1
+  assert.deepEqual([s.lastSession?.costUsd, s.lastSession?.speechUsd, s.lastSession?.transcriptionUsd], [0.023, 0.02, 0.003])
+  assert.equal(s.estimatedCostUsd, 0)
+  assert.match(s.transcript.at(-1)?.text ?? '', /Voice session ended\. OpenAI est\./)
+})
+
+test('today and this month add up every ended session in the log', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vw-log-'))
+  const now = new Date(2026, 10, 4, 22, 0).getTime()
+  const write = (at: number, costUsd: number) => {
+    const folder = join(dir, localDay(at))
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, `${at}.jsonl`), `{"kind":"session"}\n{"kind":"end","reason":"x","costUsd":${costUsd},"at":${at}}\n`)
+  }
+  write(new Date(2026, 10, 4, 9, 0).getTime(), 0.1) // today
+  write(new Date(2026, 10, 4, 21, 0).getTime(), 0.05) // today
+  write(new Date(2026, 10, 1, 8, 0).getTime(), 0.2) // this month
+  write(new Date(2026, 9, 31, 23, 0).getTime(), 9) // last month
+  const t = new TranscriptLog(dir).totals(now)
+  assert.equal(Math.round(t.todayUsd * 100) / 100, 0.15)
+  assert.equal(Math.round(t.monthUsd * 100) / 100, 0.35)
+})
+
+test('the running total includes the session in progress', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vw-log-'))
+  const { provider, session } = setup({ log: new TranscriptLog(dir) })
+  void session.listen(5000)
+  await tick()
+  provider.emit({ type: 'usage', kind: 'speech', costUsd: 0.04 })
+  assert.equal((session.state() as VoiceStateV1).todayCostUsd, 0.04)
+  session.control('end')
+  const s = session.state() as VoiceStateV1
+  assert.deepEqual([s.todayCostUsd, s.monthCostUsd], [0.04, 0.04])
 })
 
 test('a missing key is reported, not thrown away', async () => {

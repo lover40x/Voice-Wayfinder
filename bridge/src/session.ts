@@ -6,12 +6,13 @@ import {
   type TranscriptLine,
   type VoiceActivity,
   type VoiceControlAction,
+  type VoiceSessionCost,
   type VoiceStateUnchanged,
   type VoiceStateV1,
 } from '../../plugin/shared/protocol.ts'
 import type { AudioDevice, AudioEvent } from './audio.ts'
 import type { ClipCache } from './clips.ts'
-import type { TranscriptLog } from './log.ts'
+import { localDay, type TranscriptLog } from './log.ts'
 import type { ProviderEvent, VoiceProvider } from './provider.ts'
 
 export type SessionDeps = {
@@ -39,7 +40,7 @@ export type SayStatus = 'completed' | 'interrupted' | 'cancelled' | 'failed' | '
 export type SayResult = { status: SayStatus; spokenMs: number; detail?: string }
 
 export type ReplyStatus = 'replied' | 'timeout' | 'skipped' | 'ended' | 'cancelled' | 'disconnected'
-export type ReplyResult = { status: ReplyStatus; text: string; parts: string[] }
+export type ReplyResult = { status: ReplyStatus; text: string; parts: string[]; typed?: boolean }
 
 export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult }
 
@@ -59,10 +60,18 @@ type ActiveSpeech = {
   finish: (status: SayStatus, detail?: string) => void
 }
 
-type Utterance = { text: string; at: number }
+type Utterance = { text: string; at: number; typed?: boolean }
 
 const BYTES_PER_MS = 48 // PCM16 mono 24 kHz
 const MAX_LINES = 200
+
+const round = (usdValue: number) => Math.round(usdValue * 1000) / 1000
+export const usd = (n: number) => (n > 0 && n < 0.005 ? '<$0.01' : `$${n.toFixed(2)}`)
+const minutes = (ms: number) => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} s` : `${(ms / 60_000).toFixed(1)} min`)
+
+/** "4.2 min, $0.31 (Claude's speech $0.27, transcription $0.04)" */
+export const describeCost = (c: VoiceSessionCost) =>
+  `${minutes(c.durationMs)}, ${usd(c.costUsd)} (Claude's speech ${usd(c.speechUsd)} for ${minutes(c.spokenMs)}, transcription ${usd(c.transcriptionUsd)} for ${minutes(c.heardMs)})`
 
 /**
  * One long-lived voice conversation. The provider is the ears and mouth; every
@@ -84,7 +93,12 @@ export class VoiceSession {
   private nextLineId = 1
   private map?: MapSnapshot
   private rev = 1
-  private cost = 0
+  private spend = { speech: 0, transcription: 0 }
+  private spokenMs = 0
+  private heardMs = 0
+  private lastSession?: VoiceSessionCost
+  /** Spend of sessions already ended today and this month, read from the log. */
+  private history?: { day: string; todayUsd: number; monthUsd: number }
   private startedAt?: number
   private lastActivityAt = 0
   private warning?: string
@@ -95,6 +109,7 @@ export class VoiceSession {
   private audioRestarts: number[] = []
   private bargeInTimer?: NodeJS.Timeout
   private heard = new Map<string, { durationMs?: number; stoppedAt: number }>()
+  private partials = new Map<string, string>()
   private lastReplyAt?: number
   private clipSeq?: number
   private lastAck?: string
@@ -135,6 +150,7 @@ export class VoiceSession {
           this.speech = undefined
           signal?.removeEventListener('abort', onAbort)
           if (status !== 'completed') this.markLine(speech.lineId, { interrupted: true })
+          this.spokenMs += Math.round(speech.playedBytes / BYTES_PER_MS)
           this.deps.log?.timing({
             what: 'speech',
             status,
@@ -199,30 +215,56 @@ export class VoiceSession {
     return { heardBefore, answers, unasked: [] }
   }
 
-  control(action: VoiceControlAction): string {
+  control(action: VoiceControlAction, text = ''): { message: string; accepted: boolean } {
+    const done = (message: string, accepted = true) => ({ message, accepted })
     switch (action) {
       case 'mute':
         this.muted = true
         this.userSpeaking = false
         this.provider?.clearInput()
         this.touch()
-        return 'Microphone muted.'
+        return done('Microphone muted.')
       case 'unmute':
         this.muted = false
         this.touch()
-        return 'Microphone on.'
+        return done('Microphone on.')
       case 'skip':
-        if (!this.speech && !this.awaiting) return 'Nothing to skip.'
+        if (!this.speech && !this.awaiting) return done('Nothing to skip.', false)
         this.skipRequested = true
         if (this.speech) this.stopSpeech('skipped')
         this.touch()
-        return 'Question skipped.'
-      case 'end':
+        return done('Question skipped.')
+      case 'end': {
         this.endRequested = true
         if (this.speech) this.stopSpeech('ended')
+        const wasOn = !!this.provider
         this.disconnect('Voice session ended.')
-        return 'Voice session ended.'
+        if (!wasOn || !this.lastSession) return done('Voice session ended.')
+        const t = this.totals()
+        return done(
+          `Voice session ended. OpenAI est. this session: ${describeCost(this.lastSession)}. ` +
+            `Today ${usd(t.todayCostUsd ?? 0)}, this month ${usd(t.monthCostUsd ?? 0)}.`,
+        )
+      }
+      case 'type':
+        return this.typed(text)
+          ? done('Typed reply delivered as the answer.')
+          : done('No voice question is in progress, so the text was not taken as an answer.', false)
     }
+  }
+
+  /**
+   * Takes what the person typed as their answer, while a question is being
+   * spoken or awaited. Typing over Claude stops its speech, as speaking would.
+   */
+  private typed(text: string): boolean {
+    const t = text.trim()
+    if (!t || !this.provider || (!this.speech && !this.awaiting)) return false
+    if (this.speech) this.stopSpeech('interrupted')
+    this.queue.push({ text: t, at: this.now(), typed: true })
+    this.addLine('user', t, { typed: true })
+    this.touch()
+    return true
   }
 
   updateMap(patch: Partial<Omit<MapSnapshot, 'updatedAt'>>) {
@@ -244,8 +286,11 @@ export class VoiceSession {
       provider: this.provider?.name ?? 'openai-realtime',
       model: this.provider?.model ?? '',
       sessionStartedAt: this.startedAt,
-      estimatedCostUsd: Math.round(this.cost * 1000) / 1000,
+      estimatedCostUsd: round(this.currentCost()),
+      lastSession: this.lastSession,
+      ...this.totals(),
       queuedUtterances: this.queue.length,
+      partial: [...this.partials.values()].join(' ').trim() || undefined,
       warning: this.warning,
       error: this.error,
       transcript: this.lines.slice(-40),
@@ -256,8 +301,11 @@ export class VoiceSession {
   summary(): string {
     const s = this.state() as VoiceStateV1
     const parts: string[] = [s.activity]
-    if (s.sessionStartedAt) parts.push(`connected ${Math.round((this.now() - s.sessionStartedAt) / 60000)} min`)
-    parts.push(`est. $${s.estimatedCostUsd.toFixed(2)} this session`)
+    if (s.sessionStartedAt) {
+      parts.push(`connected ${Math.round((this.now() - s.sessionStartedAt) / 60000)} min`)
+      parts.push(`est. ${usd(s.estimatedCostUsd)} so far`)
+    } else if (s.lastSession) parts.push(`last voice session: ${describeCost(s.lastSession)}`)
+    if (s.todayCostUsd !== undefined) parts.push(`OpenAI est. today ${usd(s.todayCostUsd)}, this month ${usd(s.monthCostUsd ?? 0)}`)
     if (s.queuedUtterances) parts.push(`${s.queuedUtterances} unheard utterance(s) waiting: call voice_listen`)
     if (s.muted) parts.push('mic muted')
     if (s.error) parts.push(`error: ${s.error}`)
@@ -313,6 +361,9 @@ export class VoiceSession {
     }
     this.provider = provider
     this.audio = audio
+    this.spend = { speech: 0, transcription: 0 }
+    this.spokenMs = 0
+    this.heardMs = 0
     this.startedAt = this.now()
     this.lastActivityAt = this.now()
     this.deps.log?.begin(randomUUID(), { provider: provider.name, model: provider.model })
@@ -335,9 +386,39 @@ export class VoiceSession {
     audio?.stop()
     this.userSpeaking = false
     this.pending.clear()
+    this.partials.clear()
+    const cost: VoiceSessionCost = {
+      endedAt: this.now(),
+      reason,
+      durationMs: this.startedAt === undefined ? 0 : this.now() - this.startedAt,
+      costUsd: round(this.currentCost()),
+      speechUsd: round(this.spend.speech),
+      transcriptionUsd: round(this.spend.transcription),
+      spokenMs: this.spokenMs,
+      heardMs: this.heardMs,
+    }
     this.startedAt = undefined
-    this.addLine('system', reason)
-    this.deps.log?.end(reason)
+    this.lastSession = cost
+    this.spend = { speech: 0, transcription: 0 }
+    this.addLine('system', `${reason} OpenAI est.: ${describeCost(cost)}.`)
+    this.deps.log?.end(reason, cost)
+    this.history = undefined // re-read with this session in it
+  }
+
+  private currentCost() {
+    return this.spend.speech + this.spend.transcription
+  }
+
+  /** Today's and this month's spend: ended sessions from the log, plus the one in progress. */
+  private totals(): { todayCostUsd?: number; monthCostUsd?: number } {
+    const log = this.deps.log
+    if (!log) return {}
+    const day = localDay(this.now())
+    if (this.history?.day !== day) {
+      const t = log.totals(this.now())
+      this.history = { day, ...t }
+    }
+    return { todayCostUsd: round(this.history.todayUsd + this.currentCost()), monthCostUsd: round(this.history.monthUsd + this.currentCost()) }
   }
 
   private maintain() {
@@ -382,14 +463,20 @@ export class VoiceSession {
         this.userSpeaking = false
         clearTimeout(this.bargeInTimer)
         if (e.itemId) this.heard.set(e.itemId, { durationMs: e.durationMs, stoppedAt: this.now() })
+        this.heardMs += e.durationMs ?? 0
         this.touch()
         return
       case 'user.transcript_pending':
         this.pending.add(e.itemId)
         this.changed()
         return
+      case 'user.transcript_delta':
+        this.partials.set(e.itemId, (this.partials.get(e.itemId) ?? '') + e.delta)
+        this.changed()
+        return
       case 'user.transcript': {
         this.pending.delete(e.itemId)
+        this.partials.delete(e.itemId)
         const heard = this.heard.get(e.itemId)
         this.heard.delete(e.itemId)
         const durationMs = heard?.durationMs
@@ -405,11 +492,12 @@ export class VoiceSession {
       }
       case 'user.transcript_failed':
         this.pending.delete(e.itemId)
+        this.partials.delete(e.itemId)
         this.warning = `Could not transcribe one utterance: ${e.message}`
         this.changed()
         return
       case 'usage':
-        this.cost += e.costUsd
+        this.spend[e.kind] += e.costUsd
         this.changed()
         return
       case 'warning':
@@ -539,7 +627,8 @@ export class VoiceSession {
     const parts: string[] = []
     const deadline = this.now() + timeoutMs
     let lastHeardAt = this.now()
-    const result = (status: ReplyStatus): ReplyResult => ({ status, text: parts.join(' '), parts })
+    let typed = false
+    const result = (status: ReplyStatus): ReplyResult => ({ status, text: parts.join(' '), parts, ...(typed ? { typed } : {}) })
     try {
       for (;;) {
         if (signal?.aborted) return result('cancelled')
@@ -550,12 +639,16 @@ export class VoiceSession {
         }
         if (!this.provider && !this.connecting) return result('disconnected')
         while (this.queue.length) {
-          parts.push(this.queue.shift()!.text)
+          const u = this.queue.shift()!
+          parts.push(u.text)
+          typed ||= !!u.typed
           lastHeardAt = this.now()
         }
         const busy = this.userSpeaking || this.pending.size > 0
         if (busy) lastHeardAt = this.now()
-        if (parts.length && !busy && this.now() - lastHeardAt >= this.deps.endOfReplyMs) {
+        // A typed answer is finished when it is sent: no quiet window to wait out.
+        const quietEnough = typed || this.now() - lastHeardAt >= this.deps.endOfReplyMs
+        if (parts.length && !busy && quietEnough) {
           this.lastReplyAt = this.now()
           this.acknowledge()
           return result('replied')
@@ -587,8 +680,8 @@ export class VoiceSession {
     return [...new Set([...this.deps.baseVocabulary, ...fromTitles])]
   }
 
-  private addLine(who: TranscriptLine['who'], text: string): TranscriptLine {
-    const line: TranscriptLine = { id: this.nextLineId++, at: this.now(), who, text }
+  private addLine(who: TranscriptLine['who'], text: string, extra: Partial<TranscriptLine> = {}): TranscriptLine {
+    const line: TranscriptLine = { ...extra, id: this.nextLineId++, at: this.now(), who, text }
     this.lines.push(line)
     if (this.lines.length > MAX_LINES) this.lines.splice(0, this.lines.length - MAX_LINES)
     this.deps.log?.line(line)

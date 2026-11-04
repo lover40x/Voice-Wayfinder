@@ -12,6 +12,10 @@ const MIN_CLAUDE_CODE = '2.1.287'
 const POLL_MS = 600
 const RETRY_POLLS = 8 // about 5 s between tries while the bridge is unreachable
 
+// Prompts a person typed (terminal, desktop app, Remote Control); never a
+// notification, a scheduled task or another session's message.
+const TYPED_ORIGINS = new Set(['composer', 'sdk', 'bridge'])
+
 // Change the tag when VoiceStateV1 changes shape: a stored older value reads as null.
 const voice = atom({ plugin: 'voice-wayfinder', key: 'voice' } as const, null, { shape: 'voice-v1' })
 const link = atom({ plugin: 'voice-wayfinder', key: 'link' } as const, { status: 'connecting' })
@@ -105,6 +109,17 @@ async function control($: EngineInterface, action: VoiceControlAction) {
   await poll($)
 }
 
+/** Hands typed text to the bridge as the answer; false when no question is in progress. */
+async function deliverTyped($: EngineInterface, text: string): Promise<boolean> {
+  const name = await connect($)
+  if (!name) return false
+  const result = await $.mcp.call(name, 'voice_control', { action: 'type', text })
+  const s = result.structuredContent
+  const accepted = !result.isError && typeof s === 'object' && s !== null && (s as { accepted?: unknown }).accepted === true
+  if (accepted) await poll($)
+  return accepted
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'voice-map', description: 'Show the Voice Wayfinder map pane' })
@@ -114,6 +129,16 @@ export const register: Register = on => {
     }
     $.clock.every(POLL_MS, () => void poll($))
     return next(e)
+  })
+
+  // Typing while Claude asks or waits by voice answers that question at once,
+  // instead of waiting in the queue until the voice tool returns.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.command || e.isMeta || e.attachments?.length || !TYPED_ORIGINS.has(e.origin.kind) || !e.text.trim()) return next(e)
+    const s = await read($, voice)
+    if (!s || s.activity === 'off' || s.activity === 'error') return next(e)
+    if (!(await deliverTyped($, e.text))) return next(e)
+    return { drop: `Sent to the voice conversation as your answer: ${e.text}` }
   })
 
   on('command.run', { command: 'voice-map' }, async $ => {
@@ -129,6 +154,8 @@ export const register: Register = on => {
     const l = await read($, link)
     const live = s !== null && s.activity !== 'off' && s.activity !== 'error' && s.activity !== 'connecting'
     const a = ACTIVITY[s?.activity ?? 'off']
+    const asking = s?.transcript.findLast(line => line.who === 'claude')
+    const inQuestion = s !== null && (s.activity === 'speaking' || s.awaitingReply)
 
     const ticketRow = (t: MapTicket, mark: string, dim: boolean) => (
       <Text dimColor={dim} wrap="truncate-end">
@@ -145,7 +172,18 @@ export const register: Register = on => {
           </Text>
           {s?.sessionStartedAt !== undefined && (
             <Text dimColor>
-              since {clock(s.sessionStartedAt)} · est. ${s.estimatedCostUsd.toFixed(2)} · {s.model}
+              since {clock(s.sessionStartedAt)} · est. {usd(s.estimatedCostUsd)} · {s.model}
+            </Text>
+          )}
+          {s?.sessionStartedAt === undefined && s?.lastSession && (
+            <Text dimColor>
+              Last session: {minutes(s.lastSession.durationMs)} · est. {usd(s.lastSession.costUsd)} (speech {usd(s.lastSession.speechUsd)} ·
+              transcription {usd(s.lastSession.transcriptionUsd)})
+            </Text>
+          )}
+          {s?.todayCostUsd !== undefined && (
+            <Text dimColor>
+              OpenAI est. today {usd(s.todayCostUsd)} · this month {usd(s.monthCostUsd ?? 0)}
             </Text>
           )}
           {l.status !== 'ok' && l.status !== 'connecting' && <Text color="warning">{l.message ?? 'The voice bridge is not reachable.'}</Text>}
@@ -153,6 +191,16 @@ export const register: Register = on => {
           {s?.warning && <Text color="warning">{s.warning}</Text>}
           {!live && s?.activity !== 'connecting' && <Text dimColor>Ask Claude for voice mode to start talking.</Text>}
         </Box>
+
+        {live && asking && (
+          <Box key="now" flexDirection="column" borderStyle="round" paddingX={1}>
+            <Text bold color="claude">
+              {asking.text}
+            </Text>
+            {s.partial && <Text>You: {s.partial}…</Text>}
+            {inQuestion && <Text dimColor>Type in the chat box to answer instead.</Text>}
+          </Box>
+        )}
 
         {live && (
           <Box flexDirection="row" gap={1} flexWrap="wrap">
@@ -209,6 +257,7 @@ export const register: Register = on => {
               <Text dimColor={line.who === 'system'}>
                 <Text bold={line.who !== 'system'} color={line.who === 'claude' ? 'claude' : undefined}>
                   {WHO[line.who]}
+                  {line.typed ? ' ⌨' : ''}
                 </Text>{' '}
                 {line.text}
                 {line.interrupted ? <Text dimColor> (interrupted)</Text> : ''}
@@ -242,6 +291,14 @@ function isOlder(version: string, min: string): boolean {
     if (d !== 0) return d < 0
   }
   return false
+}
+
+function usd(n: number): string {
+  return n > 0 && n < 0.005 ? '<$0.01' : `$${n.toFixed(2)}`
+}
+
+function minutes(ms: number): string {
+  return ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} s` : `${(ms / 60_000).toFixed(1)} min`
 }
 
 function clock(at: number): string {
