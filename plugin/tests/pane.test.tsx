@@ -80,8 +80,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ type: 'Text', text: /Question 2 of 5/ })).toBeDefined()
     expect((await ui.find({ type: 'Markdown' }))?.text).toBe(SCREEN)
-    expect((await ui.find({ type: 'Text', text: /🔊/ }))?.text).toBe('🔊 ข้อสอง ใครได้รับแจ้งเตือนคะ')
-    expect((await ui.find({ type: 'Text', text: /🎙/ }))?.text).toBe('🎙 น่าจะเป็นข้อหนึ่ง…')
+    expect((await ui.find({ type: 'Text', text: /^Claude ข้อสอง/ }))?.text).toBe('Claude ข้อสอง ใครได้รับแจ้งเตือนคะ')
+    expect((await ui.find({ type: 'Text', text: /น่าจะเป็น/ }))?.text).toBe('You น่าจะเป็นข้อหนึ่ง…')
     expect(await ui.find({ type: 'Text', text: /^Conversation$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /ใช้ครับ/ })).toBeDefined()
     await ui.unmount()
@@ -103,12 +103,33 @@ for (const surface of ['terminal', 'desktop'] as const) {
     bridge(on, { ...STATE, partial: 'คิดว่า' }, [])
     await $.command.run(OPEN_PANE)
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect((await ui.find({ type: 'Text', text: /Listening/ }))?.text).toContain('Q2/5 ข้อสอง ใครได้รับแจ้งเตือนคะ')
-    expect((await ui.find({ type: 'Text', text: /คิดว่า/ }))?.text).toBe('You: คิดว่า…')
+    expect((await ui.find({ type: 'Text', text: /Listening/ }))?.text).toContain('Listening · Q2/5')
+    expect((await ui.find({ type: 'Text', text: /^Claude/ }))?.text).toBe('Claude ข้อสอง ใครได้รับแจ้งเตือนคะ')
+    expect((await ui.find({ type: 'Text', text: /คิดว่า/ }))?.text).toBe('You คิดว่า…')
     expect(await ui.find({ type: 'Text', text: /type here/ })).toBeDefined()
     await ui.unmount()
   })
 }
+
+test('the conversation lists the newest line first', async ($, on) => {
+  bridge(on, STATE, [])
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const lines = (await ui.findAll({ type: 'Text', text: /^(Claude|You) / })).map(t => t.text)
+  const conversation = lines.slice(lines.indexOf('Claude ข้อแรก ใช้ GitHub Issues ไหมคะ') - 2)
+  expect(conversation.slice(0, 3)).toEqual(['Claude ข้อสอง ใครได้รับแจ้งเตือนคะ', 'You ใช้ครับ', 'Claude ข้อแรก ใช้ GitHub Issues ไหมคะ'])
+  await ui.unmount()
+})
+
+test('the controls are three short buttons', async ($, on) => {
+  bridge(on, STATE, [])
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  for (const [key, label] of [['mute', '🔇 Mute'], ['skip', '⏭ Skip'], ['end', '⏹ End']]) {
+    expect((await ui.find({ key }))?.text).toBe(label)
+  }
+  await ui.unmount()
+})
 
 test('without a screen card, the card shows what Claude is saying', async ($, on) => {
   bridge(on, { ...STATE, card: undefined }, [])

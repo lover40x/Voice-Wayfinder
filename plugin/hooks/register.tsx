@@ -22,16 +22,31 @@ const TYPED_ORIGINS = new Set(['composer', 'sdk', 'bridge'])
 // Change the tag when VoiceStateV1 changes shape: a stored older value reads as null.
 const voice = atom({ plugin: 'voice-wayfinder', key: 'voice' } as const, null, { shape: 'voice-v2' })
 const link = atom({ plugin: 'voice-wayfinder', key: 'link' } as const, { status: 'connecting' })
+const tick = atom({ plugin: 'voice-wayfinder', key: 'tick' } as const, 0)
 
-const ACTIVITY: Record<VoiceActivity, { label: string; color?: string }> = {
-  off: { label: '○ Voice off', color: 'subtle' },
-  connecting: { label: '◌ Connecting…', color: 'subtle' },
-  idle: { label: '● Connected', color: 'subtle' },
-  listening: { label: '● Listening', color: 'success' },
-  hearing: { label: '◉ Hearing you', color: 'success' },
-  speaking: { label: '◉ Speaking', color: 'claude' },
-  muted: { label: '⊘ Mic muted', color: 'warning' },
-  error: { label: '✕ Voice error', color: 'error' },
+const TICK_MS = 400
+
+// One color per speaker, used for their name everywhere and for the status
+// while they talk: Claude warm, the person cool, so either is found at a glance.
+const CLAUDE = 'claude'
+const YOU = 'suggestion'
+
+const BARS = ['▁▃▅', '▃▅▇', '▅▇▅', '▇▅▃', '▅▃▁', '▃▁▃']
+
+const ACTIVITY: Record<VoiceActivity, { label: string; color: string; frames: string[] }> = {
+  off: { label: 'Voice off', color: 'subtle', frames: ['○'] },
+  connecting: { label: 'Connecting…', color: 'subtle', frames: ['◜', '◝', '◞', '◟'] },
+  idle: { label: 'Connected', color: 'subtle', frames: ['●'] },
+  listening: { label: 'Listening', color: 'success', frames: ['●', '◉', '○', '◉'] },
+  hearing: { label: 'Hearing you', color: YOU, frames: BARS },
+  speaking: { label: 'Claude speaking', color: CLAUDE, frames: BARS },
+  muted: { label: 'Mic muted', color: 'warning', frames: ['⊘'] },
+  error: { label: 'Voice error', color: 'error', frames: ['✕'] },
+}
+
+const glyph = (activity: VoiceActivity, n: number) => {
+  const frames = ACTIVITY[activity].frames
+  return frames[n % frames.length]!
 }
 
 const LIVE = new Set<VoiceActivity>(['idle', 'listening', 'hearing', 'speaking', 'muted'])
@@ -134,7 +149,7 @@ async function control($: EngineInterface, action: VoiceControlAction) {
 /** The line under the prompt: voice state and cost now, or what the last session cost. */
 function showStatus($: EngineInterface, s: VoiceStateV1) {
   let text: string | undefined
-  if (LIVE.has(s.activity)) text = `${ACTIVITY[s.activity].label} · est. ${usd(s.estimatedCostUsd)}`
+  if (LIVE.has(s.activity)) text = `${ACTIVITY[s.activity].frames[0]} ${ACTIVITY[s.activity].label} · est. ${usd(s.estimatedCostUsd)}`
   else if (s.lastSession) text = `Voice off · last session ${usd(s.lastSession.costUsd)} · today ${usd(s.todayCostUsd ?? s.lastSession.costUsd)}`
   if (text === lastStatus) return
   lastStatus = text
@@ -165,6 +180,10 @@ export const register: Register = on => {
       $.ui.toast(`voice-wayfinder needs Claude Code ${MIN_CLAUDE_CODE} or later (this is ${version}). Run: claude update`)
     }
     $.clock.every(POLL_MS, () => void poll($))
+    // Moves the status animation; idle while voice is off, so nothing redraws then.
+    $.clock.every(TICK_MS, () => {
+      if (isLive) void update($, tick, n => (n + 1) % 1200)
+    })
     return next(e)
   })
 
@@ -192,32 +211,41 @@ export const register: Register = on => {
     const s = await read($, voice)
     if (e.props.hasSurvey || !s || !LIVE.has(s.activity)) return next(e)
     const { Box, Text } = $.ui.resolve(e)
+    const n = await read($, tick)
     const a = ACTIVITY[s.activity]
     const asking = s.transcript.findLast(line => line.who === 'claude')
     const answer = s.transcript.findLast(line => line.who === 'user' && (!asking || line.id > asking.id))
     const inQuestion = s.activity === 'speaking' || s.awaitingReply
-    const round = s.card?.question !== undefined ? ` Q${s.card.question}/${s.card.of}` : ''
+    const round = s.card?.question !== undefined ? ` · Q${s.card.question}/${s.card.of}` : ''
     return (
       <Box key="voice-band" flexDirection="column">
         <Text>
           <Text bold color={a.color}>
-            {a.label}
-            {round}
+            {glyph(s.activity, n)} {a.label}
           </Text>
-          {asking ? (
-            <Text bold color="claude">
-              {' '}
-              {asking.text}
-            </Text>
-          ) : (
-            ''
-          )}
+          <Text dimColor>{round}</Text>
         </Text>
+        {asking && (
+          <Text>
+            <Text bold color={CLAUDE}>
+              Claude
+            </Text>{' '}
+            {asking.text}
+          </Text>
+        )}
         {s.partial ? (
-          <Text>You: {s.partial}…</Text>
+          <Text>
+            <Text bold color={YOU}>
+              You
+            </Text>{' '}
+            {s.partial}…
+          </Text>
         ) : answer ? (
-          <Text dimColor>
-            You{answer.typed ? ' ⌨' : ''}: {answer.text}
+          <Text>
+            <Text bold color={YOU}>
+              You{answer.typed ? ' ⌨' : ''}
+            </Text>{' '}
+            {answer.text}
           </Text>
         ) : (
           ''
@@ -231,8 +259,10 @@ export const register: Register = on => {
     const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const s = await read($, voice)
     const l = await read($, link)
+    const n = await read($, tick)
     const live = s !== null && LIVE.has(s.activity)
-    const a = ACTIVITY[s?.activity ?? 'off']
+    const activity = s?.activity ?? 'off'
+    const a = ACTIVITY[activity]
     const asking = s?.transcript.findLast(line => line.who === 'claude')
     const answer = s?.transcript.findLast(line => line.who === 'user' && (!asking || line.id > asking.id))
     const inQuestion = s !== null && (s.activity === 'speaking' || s.awaitingReply)
@@ -243,7 +273,7 @@ export const register: Register = on => {
         <Box flexDirection="column">
           <Text>
             <Text bold color={a.color}>
-              {a.label}
+              {glyph(activity, n)} {a.label}
             </Text>
             {s?.sessionStartedAt !== undefined ? <Text dimColor> · since {clock(s.sessionStartedAt)} · est. {usd(s.estimatedCostUsd)}</Text> : ''}
           </Text>
@@ -265,52 +295,57 @@ export const register: Register = on => {
         </Box>
 
         {live && (card?.screen || asking) && (
-          <Box key="card" flexDirection="column" borderStyle="round" paddingX={1}>
+          <Box key="card" flexDirection="column" borderStyle="round" borderColor={CLAUDE} paddingX={1}>
             {card?.question !== undefined && (
-              <Text bold color="claude">
+              <Text dimColor>
                 Question {card.question} of {card.of}
               </Text>
             )}
-            {card?.screen ? (
-              <Markdown key="screen" text={card.screen} />
-            ) : (
-              <Text bold color="claude">
-                {asking?.text}
-              </Text>
-            )}
+            {card?.screen ? <Markdown key="screen" text={card.screen} /> : <Text bold>{asking?.text}</Text>}
           </Box>
         )}
 
         {live && (
           <Box key="live" flexDirection="column">
             {card?.screen && asking && (
-              <Text color="claude" dimColor={s.activity !== 'speaking'}>
-                🔊 {asking.text}
+              <Text dimColor={s.activity !== 'speaking'}>
+                <Text bold color={CLAUDE}>
+                  Claude
+                </Text>{' '}
+                {asking.text}
               </Text>
             )}
             {s.partial ? (
-              <Text bold>🎙 {s.partial}…</Text>
+              <Text>
+                <Text bold color={YOU}>
+                  You
+                </Text>{' '}
+                {s.partial}…
+              </Text>
             ) : answer ? (
-              <Text dimColor>
-                {answer.typed ? '⌨' : '🎙'} {answer.text}
+              <Text>
+                <Text bold color={YOU}>
+                  You{answer.typed ? ' ⌨' : ''}
+                </Text>{' '}
+                {answer.text}
               </Text>
             ) : (
               ''
             )}
-            {inQuestion && <Text dimColor>Speak, or type in the chat box and press Enter (a choice number works).</Text>}
+            {inQuestion && <Text dimColor>Speak, or type in the chat box (a choice number works).</Text>}
           </Box>
         )}
 
         {live && (
-          <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Box key="controls" flexDirection="row" gap={1}>
             <Button key="mute" onPress={() => void control($, s.muted ? 'unmute' : 'mute')}>
-              {s.muted ? 'Unmute mic' : 'Mute mic'}
+              {s.muted ? '🎙 Unmute' : '🔇 Mute'}
             </Button>
             <Button key="skip" onPress={() => void control($, 'skip')}>
-              Skip question
+              ⏭ Skip
             </Button>
             <Button key="end" onPress={() => void control($, 'end')}>
-              End voice
+              ⏹ End
             </Button>
           </Box>
         )}
@@ -318,16 +353,19 @@ export const register: Register = on => {
         {s && s.transcript.length > 0 && (
           <Box flexDirection="column">
             <Text bold>Conversation</Text>
-            {s.transcript.slice(-16).map(line => (
-              <Text dimColor={line.who === 'system'}>
-                <Text bold={line.who !== 'system'} color={line.who === 'claude' ? 'claude' : undefined}>
-                  {WHO[line.who]}
-                  {line.typed ? ' ⌨' : ''}
-                </Text>{' '}
-                {line.text}
-                {line.interrupted ? <Text dimColor> (interrupted)</Text> : ''}
-              </Text>
-            ))}
+            {s.transcript
+              .slice(-16)
+              .reverse()
+              .map(line => (
+                <Text dimColor={line.who === 'system'}>
+                  <Text bold={line.who !== 'system'} color={line.who === 'claude' ? CLAUDE : line.who === 'user' ? YOU : undefined}>
+                    {WHO[line.who]}
+                    {line.typed ? ' ⌨' : ''}
+                  </Text>{' '}
+                  {line.text}
+                  {line.interrupted ? <Text dimColor> (interrupted)</Text> : ''}
+                </Text>
+              ))}
           </Box>
         )}
       </Box>

@@ -87,6 +87,8 @@ declare module 'claude-code' {
     'voice-wayfinder': {
       voice: Shaped<VoiceStateV1 | null>
       link: BridgeLink
+      /** Animation frame counter, advanced only while voice is on. */
+      tick: number
     }
   }
 }
