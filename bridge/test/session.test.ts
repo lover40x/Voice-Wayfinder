@@ -544,3 +544,31 @@ test('a missing key is reported, not thrown away', async () => {
   assert.equal(s.activity, 'error')
   assert.equal(s.error, 'No OpenAI key')
 })
+
+test('what the person says while Claude works can be taken at once, and only once', async () => {
+  const { provider, session } = setup()
+  await session.listen(10) // connects; nothing said yet
+  provider.utter('ระบบ context ไม่ได้บอกเหรอ')
+  const taken = session.control('take')
+  assert.equal(taken.accepted, true)
+  assert.deepEqual(taken.heard, ['ระบบ context ไม่ได้บอกเหรอ'])
+  assert.equal((session.state() as VoiceStateV1).queuedUtterances, 0)
+  assert.deepEqual(session.control('take').heard, [])
+})
+
+test('take leaves an utterance still being transcribed, and a waiting question keeps its reply', async () => {
+  const { provider, session } = setup()
+  const first = session.listen(5000)
+  await tick()
+  provider.utter('ตอบ')
+  await first
+  provider.emit({ type: 'user.speech_started' })
+  provider.emit({ type: 'user.speech_stopped' })
+  provider.emit({ type: 'user.transcript_pending', itemId: 'p' })
+  assert.deepEqual(session.control('take').heard, [])
+  provider.emit({ type: 'user.transcript', itemId: 'p', text: 'อีกเรื่อง' })
+  const reply = session.listen(5000)
+  await tick()
+  assert.deepEqual(session.control('take').heard, [])
+  assert.equal((await reply).text, 'อีกเรื่อง')
+})

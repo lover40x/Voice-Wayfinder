@@ -233,7 +233,7 @@ export class VoiceSession {
     return { heardBefore, answers, unasked: [] }
   }
 
-  control(action: VoiceControlAction, text = ''): { message: string; accepted: boolean } {
+  control(action: VoiceControlAction, text = ''): { message: string; accepted: boolean; heard?: string[] } {
     const done = (message: string, accepted = true) => ({ message, accepted })
     switch (action) {
       case 'mute':
@@ -264,11 +264,30 @@ export class VoiceSession {
             `Today ${usd(t.todayCostUsd ?? 0)}, this month ${usd(t.monthCostUsd ?? 0)}.`,
         )
       }
+      case 'take': {
+        const heard = this.takeHeard()
+        return heard.length
+          ? { message: `Took ${heard.length} utterance(s) the person said while Claude worked.`, accepted: true, heard }
+          : { message: 'Nothing waiting.', accepted: false, heard }
+      }
       case 'type':
         return this.typed(text)
           ? done('Typed reply delivered as the answer.')
           : done('No voice question is in progress, so the text was not taken as an answer.', false)
     }
+  }
+
+  /**
+   * Hands over what the person said while no question was waiting (Claude at
+   * work), so the pane can put it in front of Claude now instead of at the
+   * next question. Nothing while a question waits (that reply takes it) or
+   * while an utterance is still being spoken or transcribed (it would be cut).
+   */
+  private takeHeard(): string[] {
+    if (this.awaiting || this.userSpeaking || this.pending.size > 0) return []
+    const heard = this.queue.splice(0).map(u => u.text)
+    if (heard.length) this.changed()
+    return heard
   }
 
   /**

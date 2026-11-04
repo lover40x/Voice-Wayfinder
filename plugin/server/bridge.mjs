@@ -41050,9 +41050,25 @@ var VoiceSession = class {
           `Voice session ended. OpenAI est. this session: ${describeCost(this.lastSession)}. Today ${usd(t.todayCostUsd ?? 0)}, this month ${usd(t.monthCostUsd ?? 0)}.`
         );
       }
+      case "take": {
+        const heard = this.takeHeard();
+        return heard.length ? { message: `Took ${heard.length} utterance(s) the person said while Claude worked.`, accepted: true, heard } : { message: "Nothing waiting.", accepted: false, heard };
+      }
       case "type":
         return this.typed(text2) ? done("Typed reply delivered as the answer.") : done("No voice question is in progress, so the text was not taken as an answer.", false);
     }
+  }
+  /**
+   * Hands over what the person said while no question was waiting (Claude at
+   * work), so the pane can put it in front of Claude now instead of at the
+   * next question. Nothing while a question waits (that reply takes it) or
+   * while an utterance is still being spoken or transcribed (it would be cut).
+   */
+  takeHeard() {
+    if (this.awaiting || this.userSpeaking || this.pending.size > 0) return [];
+    const heard = this.queue.splice(0).map((u) => u.text);
+    if (heard.length) this.changed();
+    return heard;
   }
   /**
    * Takes what the person typed as their answer, while a question is being
@@ -41735,9 +41751,9 @@ server.registerTool(
   "voice_control",
   {
     title: "Voice control",
-    description: 'Mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too, and the pane uses "type" to hand over what the person typed as their answer; you never need "type".',
+    description: 'Mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
     inputSchema: {
-      action: external_exports.enum(["mute", "unmute", "skip", "end", "type"]),
+      action: external_exports.enum(["mute", "unmute", "skip", "end", "type", "take"]),
       text: external_exports.string().max(4e3).optional().describe('With "type": what the person typed.')
     }
   },

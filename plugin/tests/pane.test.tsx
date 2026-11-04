@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { VoiceStateV1 } from '../types'
@@ -55,7 +55,7 @@ const STATE: VoiceStateV1 = {
 type Call = { tool: string; args: Record<string, unknown> }
 
 /** Stands for the engine and the bridge's MCP server beneath the mod. */
-function bridge(on: On, state: VoiceStateV1, calls: Call[], acceptsTyped = true, opened: string[] = []) {
+function bridge(on: On, state: VoiceStateV1, calls: Call[], acceptsTyped = true, opened: string[] = [], prompts: string[] = []) {
   on('command.register', () => ({ value: { command: 'voice-pane' } }))
   on('ui.open', (_, e) => {
     opened.push(e.id)
@@ -64,11 +64,31 @@ function bridge(on: On, state: VoiceStateV1, calls: Call[], acceptsTyped = true,
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:voice-wayfinder:voice' } }))
   on('mcp.call', (_, e) => {
     calls.push({ tool: e.tool, args: e.args })
-    const body = e.tool === 'voice_status' ? state : e.args.action === 'type' ? { message: 'typed', accepted: acceptsTyped } : { ok: true }
+    const body =
+      e.tool === 'voice_status'
+        ? state
+        : e.args.action === 'type'
+          ? { message: 'typed', accepted: acceptsTyped }
+          : e.args.action === 'take'
+            ? take(state)
+            : { ok: true }
     return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false, structuredContent: body } }
   })
-  // The engine beneath: a prompt that reaches it enters the session.
-  on('prompt.submit', (_, e) => ({ text: e.text }))
+  // The engine beneath: a prompt that reaches it enters the session; turns and tools just run.
+  on('prompt.submit', (_, e) => {
+    prompts.push(e.text)
+    return { text: e.text }
+  })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('tool.call', () => ({ result: { stdout: 'ok', stderr: '', interrupted: false } }))
+}
+
+/** The bridge hands over what is queued once, as the real one does. */
+function take(state: VoiceStateV1) {
+  const heard = state.queuedUtterances ? state.transcript.filter(l => l.who === 'user').slice(-state.queuedUtterances).map(l => l.text) : []
+  state.queuedUtterances = 0
+  return { message: 'took', accepted: heard.length > 0, heard }
 }
 
 const typedPrompt = (text: string) => ({ text, wait: false, origin: { kind: 'sdk' } }) as const
@@ -243,4 +263,49 @@ test('starting voice mode opens the pane as the person asked', async ($, on) => 
   bridge(on, STATE, [], true, opened)
   await $.prompt.submit({ ...typedPrompt('/voice-wayfinder:voice-mode'), command: { name: 'voice-wayfinder:voice-mode', args: '' } })
   expect(opened).toContain('voice-pane')
+})
+
+/** Claude at work: connected, no question waiting, one thing said meanwhile. */
+const WORKING = (): VoiceStateV1 => ({
+  ...STATE,
+  activity: 'idle',
+  awaitingReply: false,
+  card: undefined,
+  queuedUtterances: 1,
+  transcript: [...STATE.transcript, { id: 4, at: 0, who: 'user', text: 'ใน system context ไม่ได้บอกไว้เหรอ' }],
+})
+
+test('what the person says while Claude works reaches it at the next tool call', async ($, on) => {
+  const calls: Call[] = []
+  const prompts: string[] = []
+  bridge(on, WORKING(), calls, true, [], prompts)
+  await $.turn.start({ text: 'build it', turnId: 't1' })
+  await $.command.run(OPEN_PANE)
+  const r = await $.tool.call({ tool: 'Bash', command: 'npm run build' })
+  expect(r.context?.join('\n')).toContain('ใน system context ไม่ได้บอกไว้เหรอ')
+  expect(r.context?.join('\n')).toContain('voice_say')
+  // Handed over once: the next tool's result carries nothing, and no prompt was started.
+  const again = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(again.context ?? []).toEqual([])
+  expect(calls.filter(c => c.args.action === 'take').length).toBe(1)
+  expect(prompts).toEqual([])
+})
+
+test('a voice question takes the words itself, so its result gets no note', async ($, on) => {
+  const calls: Call[] = []
+  bridge(on, WORKING(), calls)
+  await $.turn.start({ text: 'ask', turnId: 't1' })
+  await $.command.run(OPEN_PANE)
+  const r = await $.tool.call({ tool: 'mcp__plugin_voice-wayfinder_voice__voice_converse', text: 'ข้อต่อไปค่ะ' })
+  expect(r.context ?? []).toEqual([])
+  expect(calls.some(c => c.args.action === 'take')).toBe(false)
+})
+
+test('what the person says while Claude is idle starts a turn in their own words', async ($, on) => {
+  const prompts: string[] = []
+  const clock = mock.clock(on)
+  bridge(on, WORKING(), [], true, [], prompts)
+  await $.command.run(OPEN_PANE)
+  await clock.settle()
+  expect(prompts).toEqual(['🎙 ใน system context ไม่ได้บอกไว้เหรอ'])
 })

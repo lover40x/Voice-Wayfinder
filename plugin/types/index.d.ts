@@ -73,8 +73,11 @@ export type VoiceStateV1 = {
 /** What `voice_status` answers when the caller already holds `sinceRev`. */
 export type VoiceStateUnchanged = { v: 1; rev: number; unchanged: true }
 
-/** `type` delivers text the person typed as their answer (with `text`). */
-export type VoiceControlAction = 'mute' | 'unmute' | 'skip' | 'end' | 'type'
+/**
+ * `type` delivers text the person typed as their answer (with `text`); `take`
+ * hands over what they said while no question waited, answered with `heard`.
+ */
+export type VoiceControlAction = 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take'
 
 /** Whether the pane can reach the bridge's MCP server. */
 export type BridgeLink = {

@@ -245,9 +245,9 @@ server.registerTool(
   {
     title: 'Voice control',
     description:
-      'Mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too, and the pane uses "type" to hand over what the person typed as their answer; you never need "type".',
+      'Mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
     inputSchema: {
-      action: z.enum(['mute', 'unmute', 'skip', 'end', 'type']),
+      action: z.enum(['mute', 'unmute', 'skip', 'end', 'type', 'take']),
       text: z.string().max(4000).optional().describe('With "type": what the person typed.'),
     },
   },

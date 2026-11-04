@@ -4,6 +4,7 @@ All notable changes to the voice-wayfinder plugin. Versions follow semantic vers
 
 ## 0.2.0
 
+- Speaking while Claude works now gets an answer. What you say while Claude writes code or runs a build reaches it beside its next tool call's result (not only at its next voice question), and when Claude has finished its turn, what you say starts a new turn as your own words (marked 🎙). The skill tells Claude to answer at once by voice before carrying on. New `voice_control` action `take`, which the pane uses to collect those words once.
 - Pane and captions restyled: one color per speaker (Claude orange, you blue) on every name; text in the normal color; the question card in an orange frame. The status animates while voice is on (sound bars while someone speaks, a breathing dot while listening, a spinner while connecting) in the speaker's color. Controls are three short buttons on one row (🔇 Mute · ⏭ Skip · ⏹ End). The conversation lists the newest line first.
 - One-command setup: `npm run setup` checks the Mac, builds, stores the Bitwarden token in the Keychain, checks the OpenAI key arrives, installs the plugin and (after asking, with a backup) adds the voice tools allow rule to `~/.claude/settings.json`. `npm run setup:check` only reports. The README starts with a four-step quick start.
 - The thinking cue is a soft harmonic tone made locally (a chord with a slow swell and shimmer), after 3 s and again every 8 s while Claude still thinks, instead of the same spoken words every time. `thinkingCue: "<text>"` still speaks a line instead; `""` turns it off.

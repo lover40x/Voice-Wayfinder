@@ -42,6 +42,17 @@ Every second you spend between their reply and your next question is dead air fo
 - When `voice_say` or `voice_converse` reports an interruption, stop the point you were making. What the person said is the new input; answer that.
 - `heardBefore` in a result is something the person said while you were working. Take it into account before acting on the reply.
 
+## While you work
+
+The person keeps talking while you write code, run builds or read files, and expects an answer as they would from a colleague. What they say reaches you two ways:
+
+- beside a tool's result, as a note that begins "The person just said by voice, while you were working";
+- as a message of its own beginning with 🎙, when you had finished your turn.
+
+Both are the person's own words. Answer every one at once with `voice_say` (or `voice_converse` when you need their reply), in the same message as your next tool call, before you carry on: a question gets its answer, an instruction gets done or a reason it can't. Never carry on in silence, and never let a question wait until the work is done. If it changes the plan, stop and follow it.
+
+Keep the person in the loop while you work: one short `voice_say` when you start something long and when it is done, not a running commentary.
+
 ## Deciding
 
 After each decision, confirm it in one spoken sentence with `voice_converse` ("สรุปว่าใช้ GitHub Issues เป็น tracker ถูกไหมคะ"), the decision also in its `screen`. Write to the tracker only after a clear yes. On a no or a correction, fix it and confirm again.

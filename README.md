@@ -131,7 +131,7 @@ In the target repo:
 
 1. `/voice-wayfinder:voice-mode` turns voice mode on (Claude checks the bridge and greets you).
 2. `/wayfinder <idea, or the map's URL>` runs Wayfinder; every question now comes by voice.
-3. Read along in the voice pane (it opens with voice mode; `/voice-pane` reopens it) or the captions above the prompt. Answer by speaking, or type in the chat box and press Enter: during a question, what you type goes straight in as your answer. The pane's buttons mute the mic, skip a question, or end the voice session. Missed a question? Say or type "ฟังไม่ทัน" or "อีกที" and it is asked again, a little slower. A soft tone means Claude is still thinking.
+3. Read along in the voice pane (it opens with voice mode; `/voice-pane` reopens it) or the captions above the prompt. Answer by speaking, or type in the chat box and press Enter: during a question, what you type goes straight in as your answer. The pane's buttons mute the mic, skip a question, or end the voice session. Missed a question? Say or type "ฟังไม่ทัน" or "อีกที" and it is asked again, a little slower. A soft tone means Claude is still thinking. You can also speak while Claude is working (writing code, running a build): it hears you at its next step and answers by voice, and once it has finished, what you say starts its next turn. Mute the mic when you talk to someone else in the room.
 
 Use headphones if echo cancellation reports it could not start (the pane shows the warning); otherwise the speakers work too.
 

@@ -26,6 +26,14 @@ const tick = atom({ plugin: 'voice-wayfinder', key: 'tick' } as const, 0)
 
 const TICK_MS = 400
 
+// What the person said while Claude works waits this long after their last
+// words before it starts a turn of its own, so one thought is one prompt.
+const QUIET_MS = 1200
+
+// Voice tools that take the person's words themselves (or are the pane's own
+// calls): nothing is added to their results.
+const OWN_TOOLS = /voice_(status|control|converse|interview|listen)$/
+
 // One color per speaker, used for their name everywhere and for the status
 // while they talk: Claude warm, the person cool, so either is found at a glance.
 const CLAUDE = 'claude'
@@ -62,6 +70,9 @@ let waitPolls = 0
 let isLive = false
 let autoOpened = false
 let lastStatus: string | undefined
+let taking = false
+// Main-loop turns in flight; a reload starts empty, and a prompt submitted then waits for idle anyway.
+const turns = new Set<string>()
 
 async function setLink($: EngineInterface, next: BridgeLink) {
   const key = `${next.status}:${next.message ?? ''}`
@@ -125,6 +136,7 @@ async function poll($: EngineInterface, force = false) {
     if (!isLive) waitPolls = IDLE_POLLS
     await update($, voice, () => state)
     showStatus($, state)
+    if (hasWaiting(state)) void deliverIdle($)
     if (!autoOpened && isLive) {
       autoOpened = true
       void $.ui.open({ id: PANE, title: TITLE })
@@ -167,6 +179,55 @@ async function deliverTyped($: EngineInterface, text: string): Promise<boolean> 
   return accepted
 }
 
+/**
+ * Takes what the person said while no question waited; empty when nothing is
+ * finished and waiting, or another take is in flight.
+ */
+async function takeHeard($: EngineInterface): Promise<string[]> {
+  if (taking) return []
+  taking = true
+  try {
+    const name = await connect($)
+    if (!name) return []
+    const result = await $.mcp.call(name, 'voice_control', { action: 'take' })
+    const heard = (result.structuredContent as { heard?: unknown } | undefined)?.heard
+    if (result.isError || !Array.isArray(heard)) return []
+    const words = heard.filter((t): t is string => typeof t === 'string' && t.trim() !== '')
+    if (words.length) void poll($, true)
+    return words
+  } catch {
+    return []
+  } finally {
+    taking = false
+  }
+}
+
+/** Something the person said is finished and waiting, with no question to take it. */
+function hasWaiting(s: VoiceStateV1 | null): s is VoiceStateV1 {
+  return s !== null && LIVE.has(s.activity) && s.activity !== 'hearing' && !s.awaitingReply && !s.partial && s.queuedUtterances > 0
+}
+
+/** The words the model reads after a tool's result while it works. */
+function spokenNote(heard: string[]): string {
+  return (
+    `The person just said by voice, while you were working: "${heard.join(' ')}". ` +
+    'Answer them now by voice (voice_say, or voice_converse when you need their reply) before you carry on, ' +
+    'and take it into account: it may change what you are doing.'
+  )
+}
+
+/** With Claude idle, what the person said starts a turn, as their own words. */
+async function deliverIdle($: EngineInterface) {
+  if (turns.size > 0 || taking) return
+  const s = await read($, voice)
+  if (!hasWaiting(s)) return
+  const last = s.transcript.findLast(line => line.who === 'user')
+  if (last && Date.now() - last.at < QUIET_MS) return
+  const heard = await takeHeard($)
+  if (!heard.length) return
+  void $.prompt.submit({ text: `🎙 ${heard.join(' ')}`, asUser: true })
+}
+
 function openPane($: EngineInterface) {
   autoOpened = true
   void $.ui.open({ id: PANE, title: TITLE })
@@ -185,6 +246,29 @@ export const register: Register = on => {
       if (isLive) void update($, tick, n => (n + 1) % 1200)
     })
     return next(e)
+  })
+
+  // Speaking while Claude works (writing code, running a build) reaches it at
+  // its next tool call, beside that tool's result, instead of waiting for the
+  // next voice question; the bridge hands each utterance over once.
+  on('tool.call', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId !== undefined || r.deny !== undefined || OWN_TOOLS.test(e.tool)) return r
+    if (!hasWaiting(await read($, voice))) return r
+    const heard = await takeHeard($)
+    if (!heard.length) return r
+    return { ...r, context: [...(r.context ?? []), spokenNote(heard)] }
+  })
+
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) turns.add(e.turnId)
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (turns.delete(e.turnId)) void deliverIdle($)
+    return r
   })
 
   // Typing while Claude asks or waits by voice answers that question at once,
