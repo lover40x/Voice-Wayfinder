@@ -2,8 +2,9 @@
   "name": "voice-wayfinder",
   "version": "0.1.0",
   "description": "Full-duplex Thai voice front-end for /wayfinder: a realtime voice MCP bridge, voice-mode rules and a live map pane.",
-  "author": { "name": "Tan" },
-  "license": "UNLICENSED",
+  "author": { "name": "lover40x" },
+  "license": "MIT",
+  "repository": "https://github.com/lover40x/Voice-Wayfinder",
   "keywords": ["voice", "wayfinder", "realtime", "thai"],
   "types": "./types/index.d.ts",
   "mcpServers": {

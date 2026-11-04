@@ -27,7 +27,13 @@ you ⇄ vw-audio (mic + speaker, macOS echo cancellation)
 
 ## Setup
 
-### 1. Build
+### 1. Get it and build
+
+The plugin runs from a local clone: the audio helper is compiled on your Mac.
+
+```bash
+git clone https://github.com/lover40x/Voice-Wayfinder.git && cd Voice-Wayfinder
+```
 
 ```bash
 npm install
@@ -64,21 +70,21 @@ The bridge is started by `plugin/scripts/start-bridge.sh`, which runs it under `
 
 ### 3. Install the plugin
 
-From a terminal session:
+From the clone's folder, in a terminal:
 
 ```bash
-claude plugin marketplace add "/Users/poomlaupattarakasem/Documents/_Dev/Voice Wayfinder"
+claude plugin marketplace add "$PWD"
 ```
 
 ```bash
 claude plugin install voice-wayfinder@voice-wayfinder-dev
 ```
 
-In the desktop app: + next to the prompt box → Plugins → Add marketplace with this folder's path → Add plugin. The plugin is read from this folder, so after editing it run `npm run build` and `/reload-plugins`. `/reload-plugins` reloads the skill and the pane but keeps the running bridge: for a bridge change, start a new session (or stop that session's `bridge.mjs` process; Claude Code starts the new build on the next voice call).
+In the desktop app: + next to the prompt box → Plugins → Add marketplace with the clone's folder path → Add plugin. The plugin is read from this folder, so after editing it run `npm run build` and `/reload-plugins`. `/reload-plugins` reloads the skill and the pane but keeps the running bridge: for a bridge change, start a new session (or stop that session's `bridge.mjs` process; Claude Code starts the new build on the next voice call).
 
 ### 4. Wayfinder in the target repo (Phase 1)
 
-The `mattpocock-skills` plugin (1.3.1, which includes `/wayfinder`) is already installed on this Mac. In the repo you want to plan in:
+Install Matt Pocock's skills (`mattpocock-skills`, 1.3.1 or later, which includes `/wayfinder`) from the `mattpocock/skills` marketplace with `/plugin`. Then, in the repo you want to plan in:
 
 1. Run `/setup-matt-pocock-skills` so it writes the "Wayfinding operations" section and the `CLAUDE.md` pointer.
 2. Run a short text-only `/wayfinder` session and check that the map issue (label `wayfinder:map`) and its child tickets appear on GitHub.

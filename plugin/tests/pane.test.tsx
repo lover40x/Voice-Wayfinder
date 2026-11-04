@@ -52,9 +52,12 @@ const STATE: VoiceStateV1 = {
 type Call = { tool: string; args: Record<string, unknown> }
 
 /** Stands for the engine and the bridge's MCP server beneath the mod. */
-function bridge(on: On, state: VoiceStateV1, calls: Call[], acceptsTyped = true) {
+function bridge(on: On, state: VoiceStateV1, calls: Call[], acceptsTyped = true, opened: string[] = []) {
   on('command.register', () => ({ value: { command: 'voice-map' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:voice-wayfinder:voice' } }))
   on('mcp.call', (_, e) => {
     calls.push({ tool: e.tool, args: e.args })
@@ -120,6 +123,46 @@ test('after a session ends the pane shows what it cost, today and this month', a
   expect((await ui.find({ type: 'Text', text: /Last session/ }))?.text).toContain('4.2 min · est. $0.31 (speech $0.27')
   expect((await ui.find({ type: 'Text', text: /today/ }))?.text).toBe('OpenAI est. today $0.42 · this month $3.10')
   await ui.unmount()
+})
+
+const BAND = {
+  plugin: 'voice-wayfinder',
+  component: 'AbovePrompt',
+  requestId: 'band',
+  props: { hasSurvey: false, isWorking: true, maxRows: 8, bodyColumns: 60, scroll: { offset: 0, bodyRows: 8 }, view: {} },
+} as const
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`the band above the prompt captions the question and the live words on ${surface}`, async ($, on) => {
+    const calls: Call[] = []
+    bridge(on, { ...STATE, partial: 'คิดว่า' }, calls)
+    await $.command.run(OPEN_MAP)
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect((await ui.find({ type: 'Text', text: /Listening/ }))?.text).toContain('จะใช้ GitHub Issues ไหมคะ')
+    expect((await ui.find({ type: 'Text', text: /คิดว่า/ }))?.text).toBe('You: คิดว่า…')
+    expect(await ui.find({ type: 'Text', text: /Type here/ })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
+test('the band stays out of the way while voice is off', async ($, on) => {
+  const calls: Call[] = []
+  bridge(on, { ...STATE, activity: 'off', awaitingReply: false }, calls)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  await $.command.run(OPEN_MAP)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('engine band')
+  await ui.unmount()
+})
+
+test('starting voice mode opens the map pane as the person asked', async ($, on) => {
+  const opened: string[] = []
+  bridge(on, STATE, [], true, opened)
+  await $.prompt.submit({ ...typedPrompt('/voice-wayfinder:voice-mode'), command: { name: 'voice-wayfinder:voice-mode', args: '' } })
+  expect(opened).toContain('voice-map')
 })
 
 test('the caption shows what Claude is asking and the words being heard', async ($, on) => {

@@ -88,6 +88,7 @@ async function poll($: EngineInterface) {
     if ('unchanged' in state) return
     lastRev = state.rev
     await update($, voice, () => state)
+    showStatus($, state)
     if (!autoOpened && state.activity !== 'off' && state.activity !== 'error') {
       autoOpened = true
       void $.ui.open({ id: PANE, title: TITLE })
@@ -107,6 +108,19 @@ async function control($: EngineInterface, action: VoiceControlAction) {
   if (!name) return
   await $.mcp.call(name, 'voice_control', { action })
   await poll($)
+}
+
+const LIVE = new Set<VoiceActivity>(['idle', 'listening', 'hearing', 'speaking', 'muted'])
+let lastStatus: string | undefined
+
+/** The line under the prompt: voice state and cost now, or what the last session cost. */
+function showStatus($: EngineInterface, s: VoiceStateV1) {
+  let text: string | undefined
+  if (LIVE.has(s.activity)) text = `${ACTIVITY[s.activity].label} · est. ${usd(s.estimatedCostUsd)}`
+  else if (s.lastSession) text = `Voice off · last session ${usd(s.lastSession.costUsd)} · today ${usd(s.todayCostUsd ?? s.lastSession.costUsd)}`
+  if (text === lastStatus) return
+  lastStatus = text
+  $.ui.status(text)
 }
 
 /** Hands typed text to the bridge as the answer; false when no question is in progress. */
@@ -134,6 +148,11 @@ export const register: Register = on => {
   // Typing while Claude asks or waits by voice answers that question at once,
   // instead of waiting in the queue until the voice tool returns.
   on('prompt.submit', async ($, e, next) => {
+    // Opened from the person's own command, the pane is placed at any width.
+    if (e.command && (e.command.name === 'voice-mode' || e.command.name.endsWith(':voice-mode'))) {
+      autoOpened = true
+      void $.ui.open({ id: PANE, title: TITLE })
+    }
     if (e.command || e.isMeta || e.attachments?.length || !TYPED_ORIGINS.has(e.origin.kind) || !e.text.trim()) return next(e)
     const s = await read($, voice)
     if (!s || s.activity === 'off' || s.activity === 'error') return next(e)
@@ -146,6 +165,45 @@ export const register: Register = on => {
     await poll($)
     await $.ui.open({ id: PANE, title: TITLE })
     return { text: 'Voice Wayfinder map pane opened.' }
+  })
+
+  // Captions above the prompt, where they are always in view (a pane may not be
+  // placed in a narrow window): what Claude is saying and what is being heard.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const s = await read($, voice)
+    if (e.props.hasSurvey || !s || !LIVE.has(s.activity)) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const a = ACTIVITY[s.activity]
+    const asking = s.transcript.findLast(line => line.who === 'claude')
+    const answer = s.transcript.findLast(line => line.who === 'user' && (!asking || line.id > asking.id))
+    const inQuestion = s.activity === 'speaking' || s.awaitingReply
+    return (
+      <Box key="voice-band" flexDirection="column">
+        <Text>
+          <Text bold color={a.color}>
+            {a.label}
+          </Text>
+          {asking ? (
+            <Text bold color="claude">
+              {' '}
+              {asking.text}
+            </Text>
+          ) : (
+            ''
+          )}
+        </Text>
+        {s.partial ? (
+          <Text>You: {s.partial}…</Text>
+        ) : answer ? (
+          <Text dimColor>
+            You{answer.typed ? ' ⌨' : ''}: {answer.text}
+          </Text>
+        ) : (
+          ''
+        )}
+        {inQuestion && <Text dimColor>Type here and press Enter to answer in text.</Text>}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

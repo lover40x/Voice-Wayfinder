@@ -19,6 +19,7 @@ All notable changes to the voice-wayfinder plugin. Versions follow semantic vers
 - `voice_interview`: a whole grilling round asked back to back, with no wait on Claude between questions.
 - Read along: Claude writes each spoken line on screen; the pane's Now box shows the current question and the words being heard live.
 - Type to answer: Enter in the chat box during a voice question hands the text to the bridge as the answer (and stops Claude's speech); otherwise it goes to the chat as usual.
+- Captions above the prompt (always in view, unlike a pane, which is held back in windows narrower than 144 columns unless the person opens it): status, Claude's current line, the live words or the last answer. A status line under the prompt shows voice state and cost. `/voice-wayfinder:voice-mode` opens the map pane as the person's own request, so it is placed at any width.
 - Cost summary at every voice session end (duration, speech and transcription), plus today's and this month's totals from the local logs, in the transcript, the pane and `voice_status`. Log folders are named by local date.
 
 ### Fixed during the first live test

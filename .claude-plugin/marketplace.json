@@ -1,6 +1,7 @@
 {
   "name": "voice-wayfinder-dev",
-  "owner": { "name": "Tan" },
+  "owner": { "name": "lover40x" },
+  "description": "Voice Wayfinder: run /wayfinder as a spoken Thai conversation in Claude Code.",
   "plugins": [
     {
       "name": "voice-wayfinder",
