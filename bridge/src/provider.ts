@@ -22,8 +22,8 @@ export interface VoiceProvider {
   /** Resolves once the session is configured and ready for audio. */
   connect(): Promise<void>
   close(): void
-  /** Starts speaking `text` verbatim; returns the id its events carry. */
-  say(text: string): string
+  /** Starts speaking `text` verbatim (`slower` for a repeat); returns the id its events carry. */
+  say(text: string, options?: { slower?: boolean }): string
   /** Renders `text` to PCM16 without playing it (short clips kept for instant playback). */
   synthesize(text: string): Promise<Buffer>
   /** Stops generating one speech (barge-in, skip, cancel). */

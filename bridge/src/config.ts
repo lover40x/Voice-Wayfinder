@@ -30,9 +30,14 @@ export type BridgeConfig = {
     minUtteranceMs: number
     /** Short clips played the moment a reply is complete; [] turns them off. */
     acknowledgements: string[]
-    /** Said once if Claude is still thinking this long after a reply; "" turns it off. */
+    /**
+     * Played while Claude is still thinking after a reply: "tone" (a soft
+     * harmonic wave, made locally), any other text to have it spoken, "" for none.
+     */
     thinkingCue: string
     thinkingCueAfterMs: number
+    /** Played again this often while Claude still thinks (0: once). */
+    thinkingCueRepeatMs: number
   }
   session: { idleDisconnectMin: number; refreshAfterMin: number }
   vocabulary: string[]

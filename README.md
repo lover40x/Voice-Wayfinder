@@ -1,21 +1,21 @@
 # Voice Wayfinder
 
-A Claude Code plugin that lets you run Matt Pocock's `/wayfinder` as a spoken Thai conversation. Claude (in Claude Code) stays the brain and writes the map and tickets to your real issue tracker; an OpenAI realtime voice model is only the ears and mouth. Both directions stream at once, so you can interrupt Claude mid-sentence. A pane beside the transcript shows the voice status, the current ticket, the map and the live transcript.
+A Claude Code plugin that lets you run Matt Pocock's `/wayfinder` as a spoken Thai conversation. Claude (in Claude Code) stays the brain and writes the map and tickets to your real issue tracker; an OpenAI realtime voice model is only the ears and mouth. Both directions stream at once, so you can interrupt Claude mid-sentence. A voice pane beside the transcript, and captions above the prompt, show the question being asked with its answer choices, what Claude is saying, and your own words live as you speak; answer by voice or by typing (a choice number works).
 
 ```
 you ⇄ vw-audio (mic + speaker, macOS echo cancellation)
          ⇅ PCM16 24 kHz
      voice bridge (MCP server "voice") ⇄ OpenAI Realtime (speech in/out only)
          ⇅ voice_* tools                      ⇅ voice_status / voice_control
-     Claude Code running /wayfinder      map pane mod (/voice-map)
+     Claude Code running /wayfinder      voice pane + captions mod (/voice-pane)
 ```
 
 | Part | Where | What it does |
 | --- | --- | --- |
-| Bridge | `bridge/src` → bundled to `plugin/server/bridge.mjs` | MCP server: `voice_say`, `voice_listen`, `voice_converse`, `voice_status`, `voice_map_update`, `voice_control`. Provider adapter seam in `bridge/src/provider.ts`; OpenAI Realtime is the first adapter. |
+| Bridge | `bridge/src` → bundled to `plugin/server/bridge.mjs` | MCP server: `voice_say`, `voice_listen`, `voice_converse`, `voice_interview`, `voice_status`, `voice_control`. Provider adapter seam in `bridge/src/provider.ts`; OpenAI Realtime is the first adapter. |
 | Audio helper | `plugin/native/vw-audio/main.swift` | Full-duplex audio, instant flush on barge-in, macOS voice processing. Built per machine. |
 | Skill | `plugin/skills/voice-mode/SKILL.md` | The voice rules for Wayfinder: one short Thai question at a time, nothing long read aloud, confirm before writing to the tracker. |
-| Mod | `plugin/hooks/register.tsx` | The map pane. Display only: it reads the bridge through its MCP tools and never approves tools or changes permissions. |
+| Mod | `plugin/hooks/register.tsx` | The voice pane, the captions above the prompt and a status line; hands typed answers to the bridge. It reads the bridge through its MCP tools and never approves tools or changes permissions. |
 | Message format | `plugin/types/index.d.ts` (protocol v1) | The one versioned format the three parts share. |
 
 ## Requirements
@@ -95,7 +95,15 @@ In the target repo:
 
 1. `/voice-wayfinder:voice-mode` turns voice mode on (Claude checks the bridge and greets you).
 2. `/wayfinder <idea, or the map's URL>` runs Wayfinder; every question now comes by voice.
-3. `/voice-map` opens the map pane if it did not open by itself. Its buttons mute the mic, skip a question, or end the voice session.
+3. Read along in the voice pane (it opens with voice mode; `/voice-pane` reopens it) or the captions above the prompt. Answer by speaking, or type in the chat box and press Enter: during a question, what you type goes straight in as your answer. The pane's buttons mute the mic, skip a question, or end the voice session. Missed a question? Say or type "ฟังไม่ทัน" or "อีกที" and it is asked again, a little slower. A soft tone means Claude is still thinking.
+
+### Permissions
+
+In auto mode, Claude Code's permission check refuses the pane's own calls to the bridge for anything but reading state (the buttons, typed answers), since no request of yours asked for them. Allow the plugin's voice tools in `~/.claude/settings.json`, which also spares every voice turn that check:
+
+```json
+{ "permissions": { "allow": ["mcp__plugin_voice-wayfinder_voice"] } }
+```
 
 Use headphones if echo cancellation reports it could not start (the pane shows the warning); otherwise the speakers work too.
 
@@ -138,5 +146,5 @@ Run a small throwaway Wayfinder map fully by voice, then note what breaks:
 - [ ] Thai with English tech terms is transcribed well enough; Claude repeats key terms back before writing them.
 - [ ] Latency between your answer and the next question feels conversational.
 - [ ] Tickets, resolution comments and the map's Decisions-so-far land correctly on GitHub.
-- [ ] The pane follows along: current ticket, decided / blocked / fog, transcript, mute / skip / end.
+- [ ] The pane and captions follow along: question card with choices, Claude's line, your live words, conversation, mute / skip / end; typed answers land as answers.
 - [ ] Speakers without headphones: Claude does not interrupt itself.

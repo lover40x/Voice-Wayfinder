@@ -1,7 +1,7 @@
 {
   "name": "voice-wayfinder-workspace",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "description": "Workspace for the voice-wayfinder Claude Code plugin: realtime voice bridge, Wayfinder voice rules and map mod.",

@@ -2,7 +2,17 @@
 
 All notable changes to the voice-wayfinder plugin. Versions follow semantic versioning; the bridge/mod message format has its own `v` (see `plugin/types/index.d.ts`).
 
-## 0.1.0 (unreleased)
+## 0.2.0
+
+- The thinking cue is a soft harmonic tone made locally (a chord with a slow swell and shimmer), after 3 s and again every 8 s while Claude still thinks, instead of the same spoken words every time. `thinkingCue: "<text>"` still speaks a line instead; `""` turns it off.
+- "ฟังไม่ทัน", "อีกที", "อะไรนะ", "repeat" and the like are no longer taken as the answer: the question is asked again, a little slower (up to 3 times), and the results say how often (`repeats`). Short utterances only, so a real answer that contains "again" still counts.
+- The pane is now a live voice conversation, not a map: the question card Claude sends as `screen` (full question, numbered choices, recommendation; "Question 2 of 5" during a round), what Claude is saying, your words live as you speak, and the conversation. Answer by voice or by typing a choice.
+- `voice_converse` and `voice_interview` take `screen` (Markdown for the card).
+- Removed `voice_map_update` and the map from the pane, the state and the skill.
+- `/voice-map` is now `/voice-pane`.
+- `voice_status` is marked read-only, so auto mode lets the pane poll it. The pane explains a permission refusal and points at the allow rule in the README. It polls every 0.3 s while voice is on, every ~3 s while off.
+
+## 0.1.0
 
 - Realtime voice bridge (MCP server `voice`): `voice_say`, `voice_listen`, `voice_converse`, `voice_status`, `voice_map_update`, `voice_control`.
 - OpenAI Realtime adapter (GA protocol, default model `gpt-realtime-2.1`) behind the `VoiceProvider` interface; Claude Code stays the brain, the realtime model never replies on its own.

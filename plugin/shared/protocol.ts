@@ -2,11 +2,9 @@
 // in types/index.d.ts (the mod's state contract); this file adds the version.
 
 export type {
-  MapSnapshot,
-  MapTicket,
-  TicketType,
   TranscriptLine,
   VoiceActivity,
+  VoiceCard,
   VoiceControlAction,
   VoiceSessionCost,
   VoiceStateUnchanged,

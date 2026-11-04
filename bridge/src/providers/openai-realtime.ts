@@ -17,6 +17,8 @@ const READ_ALOUD = [
   'Do not translate, summarise, answer, comment or add anything before or after it.',
 ].join(' ')
 
+const SLOWER = ' The person asked to hear it again: read it a little slower and very clearly this time.'
+
 type Pending = {
   speechId: string
   responseId?: string
@@ -100,10 +102,10 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
     this.ws = undefined
   }
 
-  say(text: string): string {
+  say(text: string, options: { slower?: boolean } = {}): string {
     const speechId = `say_${this.nextId++}`
     this.speeches.set(speechId, { speechId, cancelRequested: false })
-    this.requestSpeech(speechId, text)
+    this.requestSpeech(speechId, text, options.slower ? SLOWER : '')
     return speechId
   }
 
@@ -115,13 +117,13 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
     })
   }
 
-  private requestSpeech(speechId: string, text: string) {
+  private requestSpeech(speechId: string, text: string, extra = '') {
     this.send({
       type: 'response.create',
       response: {
         conversation: 'none',
         output_modalities: ['audio'],
-        instructions: `${this.cfg.instructions ?? DEFAULT_INSTRUCTIONS}\n\n${READ_ALOUD}\n\n<script>\n${text}\n</script>`,
+        instructions: `${this.cfg.instructions ?? DEFAULT_INSTRUCTIONS}\n\n${READ_ALOUD}${extra}\n\n<script>\n${text}\n</script>`,
         input: [],
         metadata: { speech_id: speechId },
       },

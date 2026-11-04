@@ -1,23 +1,26 @@
-// The Voice Wayfinder map pane. It only displays: it reads the bridge's state
-// through the bridge's own MCP tool and never approves tools or changes permissions.
+// The voice pane and the captions above the prompt: the question in progress
+// (with its choices), what Claude is saying, what is being heard live, and the
+// conversation so far. It reads the bridge through the bridge's own MCP tool and
+// never approves tools or changes permissions.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, McpToolResult, Register } from 'claude-code'
 
-import type { BridgeLink, MapTicket, TranscriptLine, VoiceActivity, VoiceControlAction, VoiceStateUnchanged, VoiceStateV1 } from '../types'
+import type { BridgeLink, TranscriptLine, VoiceActivity, VoiceControlAction, VoiceStateUnchanged, VoiceStateV1 } from '../types'
 
-const PANE = 'voice-map'
-const TITLE = 'Voice Wayfinder'
+const PANE = 'voice-pane'
+const TITLE = 'Voice'
 const SERVER_KEY = 'voice'
 const MIN_CLAUDE_CODE = '2.1.287'
-const POLL_MS = 600
-const RETRY_POLLS = 8 // about 5 s between tries while the bridge is unreachable
+const POLL_MS = 300
+const IDLE_POLLS = 10 // while voice is off, read the bridge every ~3 s
+const RETRY_POLLS = 16 // about 5 s between tries while the bridge is unreachable
 
 // Prompts a person typed (terminal, desktop app, Remote Control); never a
 // notification, a scheduled task or another session's message.
 const TYPED_ORIGINS = new Set(['composer', 'sdk', 'bridge'])
 
 // Change the tag when VoiceStateV1 changes shape: a stored older value reads as null.
-const voice = atom({ plugin: 'voice-wayfinder', key: 'voice' } as const, null, { shape: 'voice-v1' })
+const voice = atom({ plugin: 'voice-wayfinder', key: 'voice' } as const, null, { shape: 'voice-v2' })
 const link = atom({ plugin: 'voice-wayfinder', key: 'link' } as const, { status: 'connecting' })
 
 const ACTIVITY: Record<VoiceActivity, { label: string; color?: string }> = {
@@ -31,6 +34,8 @@ const ACTIVITY: Record<VoiceActivity, { label: string; color?: string }> = {
   error: { label: '✕ Voice error', color: 'error' },
 }
 
+const LIVE = new Set<VoiceActivity>(['idle', 'listening', 'hearing', 'speaking', 'muted'])
+
 const WHO: Record<TranscriptLine['who'], string> = { user: 'You', claude: 'Claude', system: '·' }
 
 // The module's own bookkeeping; a reload starts it over, the drawn state lives in $.state.
@@ -39,7 +44,9 @@ let busy = false
 let lastRev: number | undefined
 let lastLink = ''
 let waitPolls = 0
+let isLive = false
 let autoOpened = false
+let lastStatus: string | undefined
 
 async function setLink($: EngineInterface, next: BridgeLink) {
   const key = `${next.status}:${next.message ?? ''}`
@@ -59,9 +66,17 @@ async function connect($: EngineInterface): Promise<string | undefined> {
   return server
 }
 
-async function poll($: EngineInterface) {
+/** A refusal from auto mode reads as an instruction, not a stack of jargon. */
+function explain(message: string): string {
+  if (/auto mode|classifier|permission/i.test(message)) {
+    return "Claude Code's permission check blocked the pane from reading the voice bridge. Allow voice-wayfinder's voice tools (README: Permissions), then start a new session."
+  }
+  return message
+}
+
+async function poll($: EngineInterface, force = false) {
   if (busy) return
-  if (waitPolls > 0) {
+  if (!force && waitPolls > 0) {
     waitPolls--
     return
   }
@@ -73,6 +88,7 @@ async function poll($: EngineInterface) {
       return
     }
     const result = await $.mcp.call(name, 'voice_status', { detail: 'full', ...(lastRev === undefined ? {} : { sinceRev: lastRev }) })
+    if (result.isError) throw new Error(result.content.find(b => b.type === 'text')?.text ?? 'voice_status failed')
     const state = parseState(result)
     if (!state) {
       await setLink($, { status: 'unreachable', message: 'The voice bridge answered without a state.' })
@@ -85,11 +101,16 @@ async function poll($: EngineInterface) {
       return
     }
     await setLink($, { status: 'ok' })
-    if ('unchanged' in state) return
+    if ('unchanged' in state) {
+      if (!isLive) waitPolls = IDLE_POLLS
+      return
+    }
     lastRev = state.rev
+    isLive = LIVE.has(state.activity) || state.activity === 'connecting'
+    if (!isLive) waitPolls = IDLE_POLLS
     await update($, voice, () => state)
     showStatus($, state)
-    if (!autoOpened && state.activity !== 'off' && state.activity !== 'error') {
+    if (!autoOpened && isLive) {
       autoOpened = true
       void $.ui.open({ id: PANE, title: TITLE })
     }
@@ -97,7 +118,7 @@ async function poll($: EngineInterface) {
     server = undefined
     lastRev = undefined
     waitPolls = RETRY_POLLS
-    await setLink($, { status: 'unreachable', message: err instanceof Error ? err.message : String(err) })
+    await setLink($, { status: 'unreachable', message: explain(err instanceof Error ? err.message : String(err)) })
   } finally {
     busy = false
   }
@@ -107,11 +128,8 @@ async function control($: EngineInterface, action: VoiceControlAction) {
   const name = await connect($)
   if (!name) return
   await $.mcp.call(name, 'voice_control', { action })
-  await poll($)
+  await poll($, true)
 }
-
-const LIVE = new Set<VoiceActivity>(['idle', 'listening', 'hearing', 'speaking', 'muted'])
-let lastStatus: string | undefined
 
 /** The line under the prompt: voice state and cost now, or what the last session cost. */
 function showStatus($: EngineInterface, s: VoiceStateV1) {
@@ -130,13 +148,18 @@ async function deliverTyped($: EngineInterface, text: string): Promise<boolean> 
   const result = await $.mcp.call(name, 'voice_control', { action: 'type', text })
   const s = result.structuredContent
   const accepted = !result.isError && typeof s === 'object' && s !== null && (s as { accepted?: unknown }).accepted === true
-  if (accepted) await poll($)
+  if (accepted) await poll($, true)
   return accepted
+}
+
+function openPane($: EngineInterface) {
+  autoOpened = true
+  void $.ui.open({ id: PANE, title: TITLE })
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'voice-map', description: 'Show the Voice Wayfinder map pane' })
+    await $.command.register({ name: 'voice-pane', description: 'Show the live voice conversation pane' })
     const { version } = await $.session.version()
     if (isOlder(version, MIN_CLAUDE_CODE)) {
       $.ui.toast(`voice-wayfinder needs Claude Code ${MIN_CLAUDE_CODE} or later (this is ${version}). Run: claude update`)
@@ -149,26 +172,22 @@ export const register: Register = on => {
   // instead of waiting in the queue until the voice tool returns.
   on('prompt.submit', async ($, e, next) => {
     // Opened from the person's own command, the pane is placed at any width.
-    if (e.command && (e.command.name === 'voice-mode' || e.command.name.endsWith(':voice-mode'))) {
-      autoOpened = true
-      void $.ui.open({ id: PANE, title: TITLE })
-    }
+    if (e.command && (e.command.name === 'voice-mode' || e.command.name.endsWith(':voice-mode'))) openPane($)
     if (e.command || e.isMeta || e.attachments?.length || !TYPED_ORIGINS.has(e.origin.kind) || !e.text.trim()) return next(e)
     const s = await read($, voice)
-    if (!s || s.activity === 'off' || s.activity === 'error') return next(e)
+    if (!s || !LIVE.has(s.activity)) return next(e)
     if (!(await deliverTyped($, e.text))) return next(e)
     return { drop: `Sent to the voice conversation as your answer: ${e.text}` }
   })
 
-  on('command.run', { command: 'voice-map' }, async $ => {
-    waitPolls = 0
-    await poll($)
+  on('command.run', { command: 'voice-pane' }, async $ => {
+    await poll($, true)
     await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'Voice Wayfinder map pane opened.' }
+    return { text: 'Voice pane opened.' }
   })
 
-  // Captions above the prompt, where they are always in view (a pane may not be
-  // placed in a narrow window): what Claude is saying and what is being heard.
+  // Captions above the prompt, always in view: the question being asked and the
+  // words being heard, so the person can follow without listening closely.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const s = await read($, voice)
     if (e.props.hasSurvey || !s || !LIVE.has(s.activity)) return next(e)
@@ -177,11 +196,13 @@ export const register: Register = on => {
     const asking = s.transcript.findLast(line => line.who === 'claude')
     const answer = s.transcript.findLast(line => line.who === 'user' && (!asking || line.id > asking.id))
     const inQuestion = s.activity === 'speaking' || s.awaitingReply
+    const round = s.card?.question !== undefined ? ` Q${s.card.question}/${s.card.of}` : ''
     return (
       <Box key="voice-band" flexDirection="column">
         <Text>
           <Text bold color={a.color}>
             {a.label}
+            {round}
           </Text>
           {asking ? (
             <Text bold color="claude">
@@ -201,38 +222,31 @@ export const register: Register = on => {
         ) : (
           ''
         )}
-        {inQuestion && <Text dimColor>Type here and press Enter to answer in text.</Text>}
+        {inQuestion && <Text dimColor>Speak, or type here and press Enter (a choice number works).</Text>}
       </Box>
     )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const s = await read($, voice)
     const l = await read($, link)
-    const live = s !== null && s.activity !== 'off' && s.activity !== 'error' && s.activity !== 'connecting'
+    const live = s !== null && LIVE.has(s.activity)
     const a = ACTIVITY[s?.activity ?? 'off']
     const asking = s?.transcript.findLast(line => line.who === 'claude')
+    const answer = s?.transcript.findLast(line => line.who === 'user' && (!asking || line.id > asking.id))
     const inQuestion = s !== null && (s.activity === 'speaking' || s.awaitingReply)
-
-    const ticketRow = (t: MapTicket, mark: string, dim: boolean) => (
-      <Text dimColor={dim} wrap="truncate-end">
-        {mark} {t.title}
-        {t.type ? <Text dimColor> [{t.type}]</Text> : ''}
-      </Text>
-    )
+    const card = s?.card
 
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
-          <Text bold color={a.color}>
-            {a.label}
-          </Text>
-          {s?.sessionStartedAt !== undefined && (
-            <Text dimColor>
-              since {clock(s.sessionStartedAt)} · est. {usd(s.estimatedCostUsd)} · {s.model}
+          <Text>
+            <Text bold color={a.color}>
+              {a.label}
             </Text>
-          )}
+            {s?.sessionStartedAt !== undefined ? <Text dimColor> · since {clock(s.sessionStartedAt)} · est. {usd(s.estimatedCostUsd)}</Text> : ''}
+          </Text>
           {s?.sessionStartedAt === undefined && s?.lastSession && (
             <Text dimColor>
               Last session: {minutes(s.lastSession.durationMs)} · est. {usd(s.lastSession.costUsd)} (speech {usd(s.lastSession.speechUsd)} ·
@@ -247,16 +261,43 @@ export const register: Register = on => {
           {l.status !== 'ok' && l.status !== 'connecting' && <Text color="warning">{l.message ?? 'The voice bridge is not reachable.'}</Text>}
           {s?.error && <Text color="error">{s.error}</Text>}
           {s?.warning && <Text color="warning">{s.warning}</Text>}
-          {!live && s?.activity !== 'connecting' && <Text dimColor>Ask Claude for voice mode to start talking.</Text>}
+          {!live && s?.activity !== 'connecting' && <Text dimColor>Start with /voice-wayfinder:voice-mode, then /wayfinder.</Text>}
         </Box>
 
-        {live && asking && (
-          <Box key="now" flexDirection="column" borderStyle="round" paddingX={1}>
-            <Text bold color="claude">
-              {asking.text}
-            </Text>
-            {s.partial && <Text>You: {s.partial}…</Text>}
-            {inQuestion && <Text dimColor>Type in the chat box to answer instead.</Text>}
+        {live && (card?.screen || asking) && (
+          <Box key="card" flexDirection="column" borderStyle="round" paddingX={1}>
+            {card?.question !== undefined && (
+              <Text bold color="claude">
+                Question {card.question} of {card.of}
+              </Text>
+            )}
+            {card?.screen ? (
+              <Markdown key="screen" text={card.screen} />
+            ) : (
+              <Text bold color="claude">
+                {asking?.text}
+              </Text>
+            )}
+          </Box>
+        )}
+
+        {live && (
+          <Box key="live" flexDirection="column">
+            {card?.screen && asking && (
+              <Text color="claude" dimColor={s.activity !== 'speaking'}>
+                🔊 {asking.text}
+              </Text>
+            )}
+            {s.partial ? (
+              <Text bold>🎙 {s.partial}…</Text>
+            ) : answer ? (
+              <Text dimColor>
+                {answer.typed ? '⌨' : '🎙'} {answer.text}
+              </Text>
+            ) : (
+              ''
+            )}
+            {inQuestion && <Text dimColor>Speak, or type in the chat box and press Enter (a choice number works).</Text>}
           </Box>
         )}
 
@@ -274,44 +315,10 @@ export const register: Register = on => {
           </Box>
         )}
 
-        <Box flexDirection="column">
-          <Text bold>{s?.map?.mapTitle ?? 'Map'}</Text>
-          {!s?.map && <Text dimColor>No map yet. Claude fills this in while Wayfinder runs.</Text>}
-          {s?.map?.current && (
-            <Text wrap="truncate-end">
-              ▶ <Text bold>{s.map.current.title}</Text>
-              {s.map.current.type ? <Text color="claude"> [{s.map.current.type}]</Text> : ''}
-            </Text>
-          )}
-        </Box>
-
-        {s?.map && s.map.decided.length > 0 && (
-          <Box flexDirection="column">
-            <Text bold>Decided ({s.map.decided.length})</Text>
-            {s.map.decided.map(t => ticketRow(t, '✓', true))}
-          </Box>
-        )}
-
-        {s?.map && s.map.blocked.length > 0 && (
-          <Box flexDirection="column">
-            <Text bold>Blocked ({s.map.blocked.length})</Text>
-            {s.map.blocked.map(t => ticketRow(t, '⧗', false))}
-          </Box>
-        )}
-
-        {s?.map && s.map.fog.length > 0 && (
-          <Box flexDirection="column">
-            <Text bold>Fog</Text>
-            {s.map.fog.map(f => (
-              <Text dimColor>· {f}</Text>
-            ))}
-          </Box>
-        )}
-
         {s && s.transcript.length > 0 && (
           <Box flexDirection="column">
-            <Text bold>Transcript</Text>
-            {s.transcript.slice(-12).map(line => (
+            <Text bold>Conversation</Text>
+            {s.transcript.slice(-16).map(line => (
               <Text dimColor={line.who === 'system'}>
                 <Text bold={line.who !== 'system'} color={line.who === 'claude' ? 'claude' : undefined}>
                   {WHO[line.who]}
@@ -329,7 +336,6 @@ export const register: Register = on => {
 }
 
 function parseState(result: McpToolResult): VoiceStateV1 | VoiceStateUnchanged | undefined {
-  if (result.isError) return undefined
   const structured = result.structuredContent
   if (structured && typeof structured === 'object' && 'v' in structured) return structured as VoiceStateV1
   const text = result.content.find(b => b.type === 'text')?.text

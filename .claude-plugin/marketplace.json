@@ -7,7 +7,7 @@
       "name": "voice-wayfinder",
       "source": "./plugin",
       "description": "Full-duplex Thai voice front-end for /wayfinder: realtime voice MCP bridge, voice-mode rules and a live map pane.",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   ]
 }

@@ -20,7 +20,7 @@ export function checkClaudeCodeVersion(): Promise<string | undefined> {
       if (err || !found) return resolve(undefined)
       resolve(
         compareVersions(found, MIN_CLAUDE_CODE) < 0
-          ? `Claude Code ${found} is older than ${MIN_CLAUDE_CODE}, which voice-wayfinder needs for its map pane. Run: claude update`
+          ? `Claude Code ${found} is older than ${MIN_CLAUDE_CODE}, which voice-wayfinder needs for its voice pane. Run: claude update`
           : undefined,
       )
     })

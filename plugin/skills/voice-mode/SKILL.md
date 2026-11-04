@@ -1,65 +1,60 @@
 ---
 name: voice-mode
-description: Run a conversation, especially /wayfinder grilling and decision turns, as spoken Thai through the realtime voice bridge (voice_converse, voice_say, voice_listen). Use when the person asks for voice mode, to talk instead of type, "คุยด้วยเสียง", or to run Wayfinder by voice.
+description: Run a conversation, especially /wayfinder grilling and decision turns, as spoken Thai through the realtime voice bridge (voice_interview, voice_converse, voice_say, voice_listen). Use when the person asks for voice mode, to talk instead of type, "คุยด้วยเสียง", or to run Wayfinder by voice.
 ---
 
 # Voice mode
 
 You stay the brain. The realtime voice model behind the `voice_*` tools is only ears and mouth: it reads your text aloud and transcribes the person. It never plans or decides, so never ask it to.
 
+The person follows in the voice pane and the captions above the prompt: the question card you send as `screen`, what you are saying, and their own words live as they speak. They answer by speaking or by typing, whichever is easier at the moment.
+
 ## Start
 
 1. Call `voice_status`. If it reports an error (no key, no microphone), tell the person in text what it says and stop voice mode.
 2. Greet in one short Thai sentence with `voice_say`, then carry on with the task. With `/wayfinder`, its rules all still hold: one resolved ticket per session (research excepted), research as a subagent, HITL tickets resolved only by the person's own answers.
 
+## Asking
+
+- A grilling round (several questions whose prerequisites are all settled) goes through `voice_interview`, the whole round in one call: the bridge asks each in turn and acknowledges each answer itself, so the person never waits on you between them.
+- A single question, or a follow-up that depends on an answer just heard, goes through `voice_converse`.
+- Every question goes with `screen`: Markdown with the full question, numbered answer choices and your recommendation (for a round, every question numbered Q1, Q2, …). That card is what the person reads; the pane marks which question is being asked. Don't also write the card in the chat.
+- Speak only the short version: the question in one sentence and the choice you recommend ("ข้อสอง แนะนำให้ส่งแจ้งเตือนเข้ากลุ่ม Lark ของสาขา ใช้ได้ไหมคะ"). Never read the choices out one by one.
+- Never type a question and wait for a typed answer while voice mode is on.
+
 ## Speaking
 
-- A grilling round (several questions whose prerequisites are all settled) goes through `voice_interview`, the whole round in one call: the bridge asks each in turn and acknowledges each answer itself, so the person never waits on you between them. Write the round on screen first in the grilling format, then send the spoken versions.
-- A single question, or a follow-up that depends on an answer just heard, goes through `voice_converse`.
-- Never type a question and wait for a typed answer while voice mode is on.
-- The bridge already says a short "ค่ะ" the moment an answer is complete, and "ขอคิดแป๊บนึงนะคะ" if you take a while. Don't open your next turn with an acknowledgement of your own.
-- Speak short, natural Thai: one or two sentences, about 20 seconds at most. Polite and consistent: the default voice (`marin`) speaks as a woman, so end with ค่ะ/คะ.
-- Say English technical terms, product names and ticket names in English inside the Thai sentence.
-- Never speak code, tables, ticket bodies, URLs, issue numbers or lists longer than three items. Write them on screen as normal text first, then speak a one-line gist: "รายละเอียดสามทางเลือกอยู่บนจอแล้วนะคะ เลือกทางไหนดีคะ".
+- Short, natural Thai: one sentence of about 15 words, two at most. Polite and consistent: the default voice (`marin`) speaks as a woman, so end with ค่ะ/คะ.
+- English technical terms, product names and ticket names stay in English inside the Thai sentence.
+- Never speak code, tables, ticket bodies, URLs or issue numbers. Put them in `screen`.
+- The bridge already says a short "ค่ะ" the moment an answer is complete, and plays a soft tone while you take a while. Don't open your next turn with an acknowledgement of your own.
 
 ## Pace
 
-Every second you spend between their reply and your next question is dead air for them.
-
-- Call the next `voice_*` tool as soon as you know what to say. Send tracker writes, file reads or note-taking in the same message as that call (parallel tool calls), not in turns of their own before it.
-- The person reads along as they listen: put every line you speak on screen too, as plain text in the same message as the voice call (for a `voice_interview` round, the round's questions). Keep extras (options, a table, a link) short.
-- Keep each spoken turn to one sentence of about 15 words where you can; two at most.
+Every second you spend between their reply and your next question is dead air for them. Call the next `voice_*` tool as soon as you know what to say, and send tracker writes, file reads or note-taking in the same message as that call (parallel tool calls), not in turns of their own before it.
 
 ## Hearing
 
-- Transcripts are Thai speech recognition with English mixed in; terms can be misheard. When an answer contains a term that will land in the tracker (a ticket name, a product, an API), repeat it back in your confirmation.
+- Answers may be a choice number ("ข้อสอง", "2", "อันแรก"), a yes to your recommendation, or free words. Map a number to the choice on that question's card.
+- "ฟังไม่ทัน", "อีกที", "อะไรนะ" and the like are no answer: the bridge asks the question again, a little slower, and returns only the real answer, with `repeats` saying how often it repeated. When a question needed repeats, make the next ones shorter.
+- Spoken answers are Thai speech recognition with English mixed in; terms can be misheard. When an answer contains a term that will land in the tracker (a ticket name, a product, an API), repeat it back in your confirmation.
+- Typed answers come back marked typed: take their words as written. Typed while you are working, an answer arrives as a normal message: treat it as their answer or new input, as you would a spoken one, and stay in voice mode.
 - When `voice_say` or `voice_converse` reports an interruption, stop the point you were making. What the person said is the new input; answer that.
 - `heardBefore` in a result is something the person said while you were working. Take it into account before acting on the reply.
-- The person may type instead of speaking at any moment. Typed during a question, it comes back as the reply, marked typed: take its words as written, with no need to repeat terms back. Typed while you are working, it arrives as a normal message: treat it as their answer or new input, as you would a spoken one, and stay in voice mode.
 
 ## Deciding
 
-After each decision, confirm it in one spoken sentence with `voice_converse` ("สรุปว่าใช้ GitHub Issues เป็น tracker ถูกไหมคะ"). Write to the tracker only after a clear yes. On a no or a correction, fix it and confirm again.
+After each decision, confirm it in one spoken sentence with `voice_converse` ("สรุปว่าใช้ GitHub Issues เป็น tracker ถูกไหมคะ"), the decision also in its `screen`. Write to the tracker only after a clear yes. On a no or a correction, fix it and confirm again.
 
 ## Results
 
 | Result | What to do |
 | --- | --- |
-| `replied` | Use the transcript. |
+| `replied` | Use the answer. |
 | `timeout` | Ask again once, shorter. Then `voice_listen`. If still nothing, continue in text. |
-| `skipped` | The person pressed skip in the map pane: leave this question open (note it in the ticket or fog) and move on. |
+| `skipped` | The person pressed Skip in the voice pane: leave this question open (note it in the ticket or the fog) and move on. |
 | `ended` | The person ended voice mode: continue in text, no more `voice_*` calls unless asked. |
 | `disconnected` | Call the same tool once more (it reconnects). If it fails again, continue in text. |
-
-## The map pane
-
-Keep the pane beside the transcript current with `voice_map_update`, read from the tracker (the `wayfinder:map` issue and its child issues, never Wayfinder's internal files):
-
-- after loading the map: `mapTitle`, `mapUrl`, `decided` (Decisions so far), `blocked` (open children with open blockers), `fog` (one line per patch of Not yet specified);
-- after claiming a ticket: `current` with its `wayfinder:<type>` as `type`;
-- after recording a resolution: the new `decided`, `blocked`, `fog`, and `current` cleared or moved on.
-
-Send only the fields that changed. Ticket titles stay in English.
 
 ## Ending
 

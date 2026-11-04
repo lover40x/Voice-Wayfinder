@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto'
 
 import {
   PROTOCOL_VERSION,
-  type MapSnapshot,
   type TranscriptLine,
   type VoiceActivity,
+  type VoiceCard,
   type VoiceControlAction,
   type VoiceSessionCost,
   type VoiceStateUnchanged,
@@ -29,8 +29,11 @@ export type SessionDeps = {
   minUtteranceMs?: number
   /** Played the instant a reply is complete, so the person hears they were heard. */
   acknowledgements?: readonly string[]
-  /** Played once when Claude has not spoken this long after a reply. */
-  thinkingCue?: { text: string; afterMs: number }
+  /**
+   * Played when Claude has not spoken `afterMs` after a reply, then every
+   * `repeatMs` (up to `maxTimes`): a sound (`pcm`) or a clip of spoken `text`.
+   */
+  thinkingCue?: { pcm?: Buffer; text?: string; afterMs: number; repeatMs?: number; maxTimes?: number }
   clips?: ClipCache
   now?: () => number
   tickMs?: number
@@ -42,9 +45,10 @@ export type SayResult = { status: SayStatus; spokenMs: number; detail?: string }
 export type ReplyStatus = 'replied' | 'timeout' | 'skipped' | 'ended' | 'cancelled' | 'disconnected'
 export type ReplyResult = { status: ReplyStatus; text: string; parts: string[]; typed?: boolean }
 
-export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult }
+/** `repeats`: how many times the person asked to hear the question again. */
+export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult; repeats: number }
 
-export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean }
+export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean; repeats: number }
 export type InterviewResult = { heardBefore: string[]; answers: InterviewAnswer[]; unasked: string[] }
 
 type ActiveSpeech = {
@@ -64,6 +68,17 @@ type Utterance = { text: string; at: number; typed?: boolean }
 
 const BYTES_PER_MS = 48 // PCM16 mono 24 kHz
 const MAX_LINES = 200
+const MAX_REPEATS = 3
+
+// "I didn't catch that / say it again", in the ways people say it. Matched only
+// on a short utterance, so an answer that happens to contain "again" is kept.
+const REPEAT =
+  /ฟังไม่ทัน|ไม่ได้ยิน|ได้ยินไม่ชัด|ฟังไม่ชัด|อีกที|อีกรอบ|อีกครั้ง|พูดใหม่|ถามใหม่|พูดอีก|พูดซ้ำ|ถามซ้ำ|ทวนคำถาม|ทวนอีก|ทวนหน่อย|ทวนให้|อะไรนะ|ว่าไงนะ|ว่าอะไรนะ|พูดช้า|ช้าๆ|\brepeat\b|\bagain\b|\bpardon\b|say that|didn'?t catch/i
+
+export function isRepeatRequest(text: string): boolean {
+  const t = text.trim()
+  return t.length > 0 && t.length <= 40 && REPEAT.test(t)
+}
 
 const round = (usdValue: number) => Math.round(usdValue * 1000) / 1000
 export const usd = (n: number) => (n > 0 && n < 0.005 ? '<$0.01' : `$${n.toFixed(2)}`)
@@ -91,7 +106,7 @@ export class VoiceSession {
   private endRequested = false
   private lines: TranscriptLine[] = []
   private nextLineId = 1
-  private map?: MapSnapshot
+  private card?: VoiceCard
   private rev = 1
   private spend = { speech: 0, transcription: 0 }
   private spokenMs = 0
@@ -124,11 +139,13 @@ export class VoiceSession {
 
   // ---- tools ---------------------------------------------------------------
 
-  async say(text: string, signal?: AbortSignal): Promise<SayResult> {
+  /** `card` is what goes on screen while this is spoken; each call replaces the last. */
+  async say(text: string, signal?: AbortSignal, card?: VoiceCard, slower = false): Promise<SayResult> {
     await this.ensureConnected()
     const provider = this.provider!
     if (this.speech) this.stopSpeech('cancelled')
     clearTimeout(this.cueTimer)
+    this.card = card
     const line = this.addLine('claude', text)
     const requestedAt = this.now()
     if (this.lastReplyAt !== undefined) {
@@ -137,7 +154,7 @@ export class VoiceSession {
     }
     return new Promise<SayResult>(resolve => {
       const speech: ActiveSpeech = {
-        id: provider.say(text),
+        id: provider.say(text, { slower }),
         lineId: line.id,
         requestedAt,
         lastSeq: -1,
@@ -171,43 +188,44 @@ export class VoiceSession {
 
   async listen(timeoutMs: number, signal?: AbortSignal): Promise<ReplyResult> {
     await this.ensureConnected()
-    return this.collectReply(timeoutMs, signal)
+    const reply = await this.collectReply(timeoutMs, signal)
+    if (reply.status === 'replied') this.acknowledge()
+    return reply
   }
 
-  async converse(text: string, timeoutMs: number, signal?: AbortSignal): Promise<ConverseResult> {
+  async converse(text: string, timeoutMs: number, signal?: AbortSignal, screen?: string): Promise<ConverseResult> {
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
-    const said = await this.say(text, signal)
-    const stopped = said.status === 'skipped' || said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed'
-    if (stopped) {
+    const { said, reply, repeats } = await this.ask(text, screen ? { screen } : undefined, timeoutMs, signal)
+    if (!reply) {
       if (said.status === 'skipped') this.skipRequested = false
-      return { said, heardBefore, reply: { status: said.status === 'failed' ? 'disconnected' : (said.status as ReplyStatus), text: '', parts: [] } }
+      return { said, heardBefore, reply: { status: said.status === 'failed' ? 'disconnected' : (said.status as ReplyStatus), text: '', parts: [] }, repeats }
     }
-    return { said, heardBefore, reply: await this.collectReply(timeoutMs, signal) }
+    return { said, heardBefore, reply, repeats }
   }
 
   /**
    * Asks a whole round of questions back to back, acknowledging each answer
    * at once, so Claude thinks only once per round instead of once per question.
    */
-  async interview(questions: readonly string[], timeoutMs: number, signal?: AbortSignal): Promise<InterviewResult> {
+  async interview(questions: readonly string[], timeoutMs: number, signal?: AbortSignal, screen?: string): Promise<InterviewResult> {
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
     const answers: InterviewAnswer[] = []
     for (const [i, question] of questions.entries()) {
       const unasked = () => questions.slice(i + 1)
-      const said = await this.say(question, signal)
+      const { said, reply, repeats } = await this.ask(question, { screen, question: i + 1, of: questions.length }, timeoutMs, signal)
       if (said.status === 'skipped') {
         this.skipRequested = false
-        answers.push({ question, status: 'skipped', answer: '', interrupted: false })
+        answers.push({ question, status: 'skipped', answer: '', interrupted: false, repeats })
         continue
       }
-      if (said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed') {
-        answers.push({ question, status: said.status === 'failed' ? 'disconnected' : said.status, answer: '', interrupted: false })
+      if (!reply) {
+        const status: ReplyStatus = said.status === 'failed' ? 'disconnected' : said.status === 'ended' ? 'ended' : 'cancelled'
+        answers.push({ question, status, answer: '', interrupted: false, repeats })
         return { heardBefore, answers, unasked: unasked() }
       }
-      const reply = await this.collectReply(timeoutMs, signal)
-      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === 'interrupted' })
+      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === 'interrupted', repeats })
       if (reply.status === 'ended' || reply.status === 'cancelled' || reply.status === 'disconnected') {
         return { heardBefore, answers, unasked: unasked() }
       }
@@ -267,14 +285,6 @@ export class VoiceSession {
     return true
   }
 
-  updateMap(patch: Partial<Omit<MapSnapshot, 'updatedAt'>>) {
-    const base: MapSnapshot = this.map ?? { decided: [], blocked: [], fog: [], updatedAt: 0 }
-    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined))
-    this.map = { ...base, ...defined, updatedAt: this.now() }
-    this.provider?.setVocabulary(this.vocabulary())
-    this.changed()
-  }
-
   state(sinceRev?: number): VoiceStateV1 | VoiceStateUnchanged {
     if (sinceRev === this.rev) return { v: PROTOCOL_VERSION, rev: this.rev, unchanged: true }
     return {
@@ -294,7 +304,7 @@ export class VoiceSession {
       warning: this.warning,
       error: this.error,
       transcript: this.lines.slice(-40),
-      map: this.map,
+      card: this.card,
     }
   }
 
@@ -568,37 +578,72 @@ export class VoiceSession {
 
   // ---- helpers -------------------------------------------------------------
 
-  /** Says "heard you" at once, and "one moment" if Claude then takes a while. */
+  /** Says "heard you" at once, then the thinking cue if Claude takes a while. */
   private acknowledge() {
     const clips = this.deps.clips
-    if (!clips) return
-    const ready = (this.deps.acknowledgements ?? []).filter(t => clips.get(t))
+    const ready = clips ? (this.deps.acknowledgements ?? []).filter(t => clips.get(t)) : []
     if (ready.length) {
       const choices = ready.length > 1 ? ready.filter(t => t !== this.lastAck) : ready
       const text = choices[Math.floor(Math.random() * choices.length)]!
       this.lastAck = text
-      this.playClip(text)
+      this.playPcm(clips!.get(text)!, text)
     }
-    const cue = this.deps.thinkingCue
-    if (cue && clips.get(cue.text)) {
-      clearTimeout(this.cueTimer)
-      this.cueTimer = setTimeout(() => {
-        if (this.provider && !this.speech && !this.awaiting && !this.userSpeaking) this.playClip(cue.text)
-      }, cue.afterMs)
-      this.cueTimer.unref?.()
-    }
+    this.startThinkingCue()
   }
 
-  private playClip(text: string) {
-    const pcm = this.deps.clips?.get(text)
-    if (!pcm || !this.audio || this.speech) return
+  private startThinkingCue() {
+    const cue = this.deps.thinkingCue
+    if (!cue) return
+    clearTimeout(this.cueTimer)
+    let played = 0
+    const fire = () => {
+      if (!this.provider || this.speech || this.awaiting || this.userSpeaking) return
+      const pcm = cue.pcm ?? (cue.text ? this.deps.clips?.get(cue.text) : undefined)
+      if (pcm) this.playPcm(pcm, cue.text ?? 'thinking tone')
+      played++
+      if (cue.repeatMs && played < (cue.maxTimes ?? 4)) {
+        this.cueTimer = setTimeout(fire, cue.repeatMs)
+        this.cueTimer.unref?.()
+      }
+    }
+    this.cueTimer = setTimeout(fire, cue.afterMs)
+    this.cueTimer.unref?.()
+  }
+
+  private playPcm(pcm: Buffer, label: string) {
+    if (!this.audio || this.speech) return
     this.clipSeq = this.audio.play(pcm)
-    this.deps.log?.timing({ what: 'clip', text, afterReplyMs: this.lastReplyAt === undefined ? -1 : this.now() - this.lastReplyAt })
+    this.deps.log?.timing({ what: 'clip', text: label, afterReplyMs: this.lastReplyAt === undefined ? -1 : this.now() - this.lastReplyAt })
+  }
+
+  /**
+   * Speaks a question and collects the answer. "I didn't catch that" is no
+   * answer: the question is asked again, a little slower, until one comes.
+   */
+  private async ask(question: string, card: VoiceCard | undefined, timeoutMs: number, signal?: AbortSignal) {
+    let repeats = 0
+    let text = question
+    for (;;) {
+      const said = await this.say(text, signal, card, repeats > 0)
+      if (said.status === 'skipped' || said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed') {
+        return { said, repeats, reply: undefined }
+      }
+      const reply = await this.collectReply(timeoutMs, signal)
+      if (reply.status === 'replied' && repeats < MAX_REPEATS && isRepeatRequest(reply.text)) {
+        repeats++
+        this.deps.log?.timing({ what: 'repeat', n: repeats })
+        text = `ได้ค่ะ ${question}`
+        continue
+      }
+      if (reply.status === 'replied') this.acknowledge()
+      return { said, repeats, reply }
+    }
   }
 
   private warmClips(provider: VoiceProvider) {
     const clips = this.deps.clips
-    const texts = [...(this.deps.acknowledgements ?? []), ...(this.deps.thinkingCue ? [this.deps.thinkingCue.text] : [])]
+    const cueText = this.deps.thinkingCue && !this.deps.thinkingCue.pcm ? this.deps.thinkingCue.text : undefined
+    const texts = [...(this.deps.acknowledgements ?? []), ...(cueText ? [cueText] : [])]
     if (!clips || !texts.length) return
     clips.warm(texts, t => provider.synthesize(t)).catch(err => this.warn(`Acknowledgement clips not ready: ${(err as Error).message}`))
   }
@@ -650,7 +695,6 @@ export class VoiceSession {
         const quietEnough = typed || this.now() - lastHeardAt >= this.deps.endOfReplyMs
         if (parts.length && !busy && quietEnough) {
           this.lastReplyAt = this.now()
-          this.acknowledge()
           return result('replied')
         }
         if (!parts.length && !busy && this.now() >= deadline) return result('timeout')
@@ -673,11 +717,7 @@ export class VoiceSession {
   }
 
   private vocabulary(): string[] {
-    const titles = [this.map?.current, ...(this.map?.decided ?? []), ...(this.map?.blocked ?? [])]
-      .filter(t => t !== undefined)
-      .map(t => t.title)
-    const fromTitles = titles.flatMap(t => t.match(/[A-Za-z][A-Za-z0-9.+#_-]{2,}/g) ?? [])
-    return [...new Set([...this.deps.baseVocabulary, ...fromTitles])]
+    return [...new Set(this.deps.baseVocabulary)]
   }
 
   private addLine(who: TranscriptLine['who'], text: string, extra: Partial<TranscriptLine> = {}): TranscriptLine {

@@ -11,9 +11,10 @@ import { ClipCache } from './clips.ts'
 import { TranscriptLog } from './log.ts'
 import { DEFAULT_INSTRUCTIONS, OpenAIRealtimeProvider } from './providers/openai-realtime.ts'
 import { VoiceSession, type ReplyResult, type SayResult } from './session.ts'
+import { waveTone } from './tone.ts'
 import { checkClaudeCodeVersion } from './version.ts'
 
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT ?? resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const cfg = loadConfig(pluginRoot)
 
@@ -21,6 +22,12 @@ const cfg = loadConfig(pluginRoot)
 const apiKey = process.env[cfg.openai.apiKeyEnv]
 delete process.env[cfg.openai.apiKeyEnv]
 delete process.env.BWS_ACCESS_TOKEN
+
+function thinkingCue() {
+  const { thinkingCue: cue, thinkingCueAfterMs: afterMs, thinkingCueRepeatMs: repeatMs } = cfg.conversation
+  if (!cue) return undefined
+  return cue === 'tone' ? { pcm: waveTone(), afterMs, repeatMs } : { text: cue, afterMs, repeatMs }
+}
 
 const session = new VoiceSession({
   createProvider: () => {
@@ -39,7 +46,7 @@ const session = new VoiceSession({
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
   minUtteranceMs: cfg.conversation.minUtteranceMs,
   acknowledgements: cfg.conversation.acknowledgements,
-  thinkingCue: cfg.conversation.thinkingCue ? { text: cfg.conversation.thinkingCue, afterMs: cfg.conversation.thinkingCueAfterMs } : undefined,
+  thinkingCue: thinkingCue(),
   // Anything that changes how a clip sounds is part of its cache key.
   clips: new ClipCache(defaultClipDir(), [cfg.openai.model, cfg.openai.voice, cfg.openai.speed, cfg.openai.instructions ?? DEFAULT_INSTRUCTIONS].join('|')),
   idleDisconnectMs: cfg.session.idleDisconnectMin * 60_000,
@@ -88,7 +95,7 @@ const describeSay = (r: SayResult) => {
     case 'interrupted':
       return `The person interrupted after ${(r.spokenMs / 1000).toFixed(1)}s. Treat what they say next as the new input: call voice_listen.`
     case 'skipped':
-      return 'The person pressed "skip question" in the map pane. Move on without an answer.'
+      return 'The person pressed "skip question" in the voice pane. Move on without an answer.'
     case 'ended':
       return 'The person ended the voice session. Continue in text.'
     case 'cancelled':
@@ -118,6 +125,14 @@ const describeReply = (r: ReplyResult) => {
 }
 
 const timeoutSec = z.number().int().min(5).max(900).optional().describe(`How long to wait for the person to start speaking (default ${cfg.conversation.replyTimeoutSec}s).`)
+
+const screen = z
+  .string()
+  .max(6000)
+  .optional()
+  .describe(
+    'Markdown shown in the voice pane while you ask: the full question, numbered answer choices and your recommendation. The person reads it and answers by voice or by typing (e.g. "2"). Speak only the short version.',
+  )
 
 server.registerTool(
   'voice_say',
@@ -150,16 +165,18 @@ server.registerTool(
       "Speak a question in Thai, then wait for the person's spoken reply and return its transcript. Handles barge-in: if they interrupt, speech stops and the interruption is treated as their reply. The main tool for grilling and decision turns.",
     inputSchema: {
       text: z.string().min(1).max(2000).describe('One question, in short natural spoken Thai. No code, tables, lists or URLs.'),
+      screen,
       timeoutSec,
     },
   },
-  ({ text: t, timeoutSec: s }, extra) =>
+  ({ text: t, screen: card, timeoutSec: s }, extra) =>
     guarded(
       extra as Extra,
-      () => session.converse(t, (s ?? cfg.conversation.replyTimeoutSec) * 1000, extra.signal),
+      () => session.converse(t, (s ?? cfg.conversation.replyTimeoutSec) * 1000, extra.signal, card),
       r => {
         const lines = []
         if (r.heardBefore.length) lines.push(`Before this question the person had also said: ${r.heardBefore.join(' ')}`)
+        if (r.repeats) lines.push(`The person asked to hear the question again; it was repeated ${r.repeats} time(s) before this answer.`)
         if (r.said.status !== 'completed') lines.push(describeSay(r.said))
         if (r.said.status === 'completed' || r.said.status === 'interrupted') lines.push(describeReply(r.reply))
         return text(lines.join('\n'), r)
@@ -179,19 +196,23 @@ server.registerTool(
         .min(1)
         .max(8)
         .describe('Each question in short natural spoken Thai, worded so a yes accepts your recommendation. No code, tables, lists or URLs.'),
+      screen: screen.describe(
+        'Markdown for the whole round, shown in the voice pane while it runs: each question numbered (Q1, Q2, …) with its choices and your recommendation. The pane marks which one is being asked.',
+      ),
       timeoutSec,
     },
   },
-  ({ questions, timeoutSec: s }, extra) =>
+  ({ questions, screen: card, timeoutSec: s }, extra) =>
     guarded(
       extra as Extra,
-      () => session.interview(questions, (s ?? cfg.conversation.replyTimeoutSec) * 1000, extra.signal),
+      () => session.interview(questions, (s ?? cfg.conversation.replyTimeoutSec) * 1000, extra.signal, card),
       r => {
         const lines = []
         if (r.heardBefore.length) lines.push(`Before the round the person had also said: ${r.heardBefore.join(' ')}`)
         r.answers.forEach((a, i) => {
           const heard = a.status === 'replied' ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [] })})`
-          lines.push(`Q${i + 1}: ${a.question}\nA${i + 1}${a.interrupted ? ' (they cut in while it was being asked)' : ''}: ${heard}`)
+          const notes = [a.interrupted && 'they cut in while it was being asked', a.repeats && `asked to hear it again, repeated ${a.repeats}×`].filter(Boolean)
+          lines.push(`Q${i + 1}: ${a.question}\nA${i + 1}${notes.length ? ` (${notes.join('; ')})` : ''}: ${heard}`)
         })
         if (r.unasked.length) lines.push(`Not asked: ${r.unasked.join(' | ')}`)
         lines.push('Answers are Thai speech, transcribed; English terms may be misheard.')
@@ -204,11 +225,13 @@ server.registerTool(
   'voice_status',
   {
     title: 'Voice status',
-    description: 'Report whether the voice session is off, idle, listening, hearing or speaking, plus cost so far and any problem. detail "full" is for the map pane.',
+    description: 'Report whether the voice session is off, idle, listening, hearing or speaking, plus cost so far and any problem. detail "full" is for the voice pane.',
     inputSchema: {
       detail: z.enum(['summary', 'full']).optional(),
       sinceRev: z.number().int().optional().describe('Full detail only: answer { unchanged: true } when the state is still at this revision.'),
     },
+    // It only reads the bridge's state. Marked so, auto mode lets the pane poll it.
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   async ({ detail, sinceRev }) => {
     if (detail !== 'full') return text(session.summary())
@@ -217,39 +240,12 @@ server.registerTool(
   },
 )
 
-const ticket = z.object({
-  title: z.string(),
-  url: z.string().optional(),
-  type: z.enum(['grilling', 'prototype', 'research', 'task']).optional(),
-})
-
-server.registerTool(
-  'voice_map_update',
-  {
-    title: 'Update map pane',
-    description:
-      'Tell the map pane what the Wayfinder map looks like, read from the issue tracker (wayfinder:map issue and its child tickets). Send only the fields that changed; arrays replace. Ticket titles also teach the speech recogniser their terms.',
-    inputSchema: {
-      mapTitle: z.string().optional(),
-      mapUrl: z.string().optional(),
-      current: ticket.optional().describe('The ticket this session has claimed.'),
-      decided: z.array(ticket).optional().describe('Closed tickets (Decisions so far).'),
-      blocked: z.array(ticket).optional().describe('Open tickets still blocked by others.'),
-      fog: z.array(z.string()).optional().describe('One line per patch of "Not yet specified".'),
-    },
-  },
-  async patch => {
-    session.updateMap(patch)
-    return text('Map pane updated.')
-  },
-)
-
 server.registerTool(
   'voice_control',
   {
     title: 'Voice control',
     description:
-      'Mute or unmute the microphone, skip the current question, or end the voice session. The map pane buttons call this too, and the pane uses "type" to hand over what the person typed as their answer; you never need "type".',
+      'Mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too, and the pane uses "type" to hand over what the person typed as their answer; you never need "type".',
     inputSchema: {
       action: z.enum(['mute', 'unmute', 'skip', 'end', 'type']),
       text: z.string().max(4000).optional().describe('With "type": what the person typed.'),

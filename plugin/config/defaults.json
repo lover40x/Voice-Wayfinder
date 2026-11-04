@@ -33,8 +33,9 @@
     "bargeInConfirmMs": 250,
     "minUtteranceMs": 300,
     "acknowledgements": ["ค่ะ", "รับทราบค่ะ", "โอเคค่ะ"],
-    "thinkingCue": "ขอคิดแป๊บนึงนะคะ",
-    "thinkingCueAfterMs": 4000
+    "thinkingCue": "tone",
+    "thinkingCueAfterMs": 3000,
+    "thinkingCueRepeatMs": 8000
   },
   "session": {
     "idleDisconnectMin": 10,

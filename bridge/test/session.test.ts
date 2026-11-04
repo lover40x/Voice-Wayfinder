@@ -8,6 +8,8 @@ import type { VoiceStateV1 } from '../../plugin/shared/protocol.ts'
 import type { AudioDevice, AudioEvent } from '../src/audio.ts'
 import { ClipCache } from '../src/clips.ts'
 import { localDay, TranscriptLog } from '../src/log.ts'
+import { isRepeatRequest } from '../src/session.ts'
+import { waveTone } from '../src/tone.ts'
 import type { ProviderEvent, VoiceProvider } from '../src/provider.ts'
 import { VoiceSession } from '../src/session.ts'
 
@@ -350,22 +352,26 @@ test('what the person said while Claude was thinking is reported before the ques
   assert.equal(r.reply.text, 'ได้ครับ')
 })
 
-test('the pane can ask for state since a revision', () => {
+test('the pane can ask for state since a revision', async () => {
   const { session } = setup()
   const s = session.state() as VoiceStateV1
   assert.deepEqual(session.state(s.rev), { v: 1, rev: s.rev, unchanged: true })
-  session.updateMap({ current: { title: 'Choose the auth provider', type: 'grilling' } })
+  void session.converse('เลือกข้อไหนคะ', 5000, undefined, '**Q1** Auth?\n1. Clerk\n2. Supabase')
+  await tick()
   const next = session.state(s.rev) as VoiceStateV1
-  assert.equal(next.map?.current?.title, 'Choose the auth provider')
+  assert.equal(next.card?.screen, '**Q1** Auth?\n1. Clerk\n2. Supabase')
 })
 
-test('ticket titles teach the recogniser their terms', async () => {
-  const { provider, session } = setup()
-  void session.listen(50)
+test('an interview round shows its card and which question is being asked', async () => {
+  const { provider, audio, session } = setup()
+  void session.interview(['ข้อหนึ่ง', 'ข้อสอง'], 5000, undefined, 'Q1 …\nQ2 …')
   await tick()
-  session.updateMap({ current: { title: 'Pick Supabase or Postgres RLS' } })
-  assert.ok(provider.vocabulary.includes('Supabase'))
-  assert.ok(provider.vocabulary.includes('RLS'))
+  assert.deepEqual((session.state() as VoiceStateV1).card, { screen: 'Q1 …\nQ2 …', question: 1, of: 2 })
+  speakThrough(provider, audio, 's1')
+  await tick()
+  provider.utter('ได้')
+  await tick(80)
+  assert.deepEqual((session.state() as VoiceStateV1).card, { screen: 'Q1 …\nQ2 …', question: 2, of: 2 })
 })
 
 test('a typed answer while listening returns at once, marked as typed', async () => {
@@ -453,6 +459,78 @@ test('the running total includes the session in progress', async () => {
   session.control('end')
   const s = session.state() as VoiceStateV1
   assert.deepEqual([s.todayCostUsd, s.monthCostUsd], [0.04, 0.04])
+})
+
+test('the thinking tone is soft and starts and ends in silence', () => {
+  const pcm = waveTone({ durationMs: 1400, volume: 0.12 })
+  assert.equal(pcm.length, 1400 * 24 * 2)
+  const samples = Array.from({ length: pcm.length / 2 }, (_, i) => pcm.readInt16LE(i * 2))
+  assert.ok(Math.abs(samples[0]!) < 50 && Math.abs(samples.at(-1)!) < 50)
+  assert.ok(Math.max(...samples.map(Math.abs)) <= 0.12 * 32767 + 1)
+  assert.ok(Math.max(...samples.map(Math.abs)) > 1000)
+})
+
+test('the thinking tone plays after a pause and again while Claude still thinks', async () => {
+  const { provider, audio, session } = setup({ thinkingCue: { pcm: Buffer.alloc(960), afterMs: 20, repeatMs: 30, maxTimes: 3 } })
+  const reply = session.listen(5000)
+  await tick()
+  provider.utter('ตอบแล้ว')
+  await reply
+  await tick(150)
+  assert.deepEqual(audio.plays, [960, 960, 960])
+})
+
+test('saying you did not catch it repeats the question instead of answering', async () => {
+  const { provider, audio, session } = setup({ ...withClips, clips: new ClipCache(undefined, 'r1') })
+  const turn = session.converse('ข้อสอง ใครได้รับแจ้งเตือนคะ', 5000)
+  await tick()
+  speakThrough(provider, audio, 's1')
+  await tick()
+  provider.utter('ฟังไม่ทันครับ')
+  await tick(80)
+  assert.deepEqual(provider.said, ['ข้อสอง ใครได้รับแจ้งเตือนคะ', 'ได้ค่ะ ข้อสอง ใครได้รับแจ้งเตือนคะ'])
+  assert.equal(audio.plays.filter(n => n === CLIP).length, 0) // no "ค่ะ" for a repeat request
+  speakThrough(provider, audio, 's2')
+  await tick()
+  provider.utter('ผู้จัดการสาขา')
+  const r = await turn
+  assert.equal(r.reply.text, 'ผู้จัดการสาขา')
+  assert.equal(r.repeats, 1)
+})
+
+test('in a round, a typed "again" repeats that question and the round goes on', async () => {
+  const { provider, audio, session } = setup()
+  const round = session.interview(['ข้อหนึ่ง', 'ข้อสอง'], 5000)
+  await tick()
+  speakThrough(provider, audio, 's1')
+  await tick()
+  session.control('type', 'อีกที')
+  await tick(30)
+  assert.equal(provider.said.at(-1), 'ได้ค่ะ ข้อหนึ่ง')
+  speakThrough(provider, audio, 's2')
+  await tick()
+  provider.utter('หนึ่ง')
+  await tick(80)
+  speakThrough(provider, audio, 's3')
+  await tick()
+  provider.utter('สอง')
+  const r = await round
+  assert.deepEqual(
+    r.answers.map(a => [a.answer, a.repeats]),
+    [
+      ['หนึ่ง', 1],
+      ['สอง', 0],
+    ],
+  )
+})
+
+test('repeat requests are told apart from real answers', () => {
+  for (const t of ['ฟังไม่ทัน', 'ขออีกที', 'พูดใหม่ได้ไหม', 'อะไรนะคะ', 'ไม่ได้ยินครับ', 'ทวนหน่อย', 'repeat please', 'say that again']) {
+    assert.equal(isRepeatRequest(t), true, t)
+  }
+  for (const t of ['2', 'ข้อสอง', 'ใช่ครับ', 'ไม่ทัน', 'ยังไม่ชัดเจน', 'ให้ส่งแจ้งเตือนอีกครั้งตอนเช้า ถ้ายังไม่มีใครเปิดดูภายในหนึ่งชั่วโมง', 'ไม่ซ้ำกัน']) {
+    assert.equal(isRepeatRequest(t), false, t)
+  }
 })
 
 test('a missing key is reported, not thrown away', async () => {

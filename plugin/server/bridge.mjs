@@ -40631,6 +40631,7 @@ var READ_ALOUD = [
   "Read the script below aloud exactly as written.",
   "Do not translate, summarise, answer, comment or add anything before or after it."
 ].join(" ");
+var SLOWER = " The person asked to hear it again: read it a little slower and very clearly this time.";
 var OpenAIRealtimeProvider = class {
   name = "openai-realtime";
   model;
@@ -40697,10 +40698,10 @@ var OpenAIRealtimeProvider = class {
     this.ws?.close();
     this.ws = void 0;
   }
-  say(text2) {
+  say(text2, options = {}) {
     const speechId = `say_${this.nextId++}`;
     this.speeches.set(speechId, { speechId, cancelRequested: false });
-    this.requestSpeech(speechId, text2);
+    this.requestSpeech(speechId, text2, options.slower ? SLOWER : "");
     return speechId;
   }
   synthesize(text2) {
@@ -40710,7 +40711,7 @@ var OpenAIRealtimeProvider = class {
       this.requestSpeech(speechId, text2);
     });
   }
-  requestSpeech(speechId, text2) {
+  requestSpeech(speechId, text2, extra = "") {
     this.send({
       type: "response.create",
       response: {
@@ -40718,7 +40719,7 @@ var OpenAIRealtimeProvider = class {
         output_modalities: ["audio"],
         instructions: `${this.cfg.instructions ?? DEFAULT_INSTRUCTIONS}
 
-${READ_ALOUD}
+${READ_ALOUD}${extra}
 
 <script>
 ${text2}
@@ -40875,6 +40876,12 @@ var PROTOCOL_VERSION = 1;
 // bridge/src/session.ts
 var BYTES_PER_MS = 48;
 var MAX_LINES = 200;
+var MAX_REPEATS = 3;
+var REPEAT = /ฟังไม่ทัน|ไม่ได้ยิน|ได้ยินไม่ชัด|ฟังไม่ชัด|อีกที|อีกรอบ|อีกครั้ง|พูดใหม่|ถามใหม่|พูดอีก|พูดซ้ำ|ถามซ้ำ|ทวนคำถาม|ทวนอีก|ทวนหน่อย|ทวนให้|อะไรนะ|ว่าไงนะ|ว่าอะไรนะ|พูดช้า|ช้าๆ|\brepeat\b|\bagain\b|\bpardon\b|say that|didn'?t catch/i;
+function isRepeatRequest(text2) {
+  const t = text2.trim();
+  return t.length > 0 && t.length <= 40 && REPEAT.test(t);
+}
 var round = (usdValue) => Math.round(usdValue * 1e3) / 1e3;
 var usd = (n) => n > 0 && n < 5e-3 ? "<$0.01" : `$${n.toFixed(2)}`;
 var minutes = (ms) => ms < 6e4 ? `${Math.max(1, Math.round(ms / 1e3))} s` : `${(ms / 6e4).toFixed(1)} min`;
@@ -40893,7 +40900,7 @@ var VoiceSession = class {
   endRequested = false;
   lines = [];
   nextLineId = 1;
-  map;
+  card;
   rev = 1;
   spend = { speech: 0, transcription: 0 };
   spokenMs = 0;
@@ -40923,11 +40930,13 @@ var VoiceSession = class {
     this.tickMs = deps.tickMs ?? 50;
   }
   // ---- tools ---------------------------------------------------------------
-  async say(text2, signal) {
+  /** `card` is what goes on screen while this is spoken; each call replaces the last. */
+  async say(text2, signal, card, slower = false) {
     await this.ensureConnected();
     const provider = this.provider;
     if (this.speech) this.stopSpeech("cancelled");
     clearTimeout(this.cueTimer);
+    this.card = card;
     const line = this.addLine("claude", text2);
     const requestedAt = this.now();
     if (this.lastReplyAt !== void 0) {
@@ -40936,7 +40945,7 @@ var VoiceSession = class {
     }
     return new Promise((resolve2) => {
       const speech = {
-        id: provider.say(text2),
+        id: provider.say(text2, { slower }),
         lineId: line.id,
         requestedAt,
         lastSeq: -1,
@@ -40969,41 +40978,42 @@ var VoiceSession = class {
   }
   async listen(timeoutMs, signal) {
     await this.ensureConnected();
-    return this.collectReply(timeoutMs, signal);
+    const reply = await this.collectReply(timeoutMs, signal);
+    if (reply.status === "replied") this.acknowledge();
+    return reply;
   }
-  async converse(text2, timeoutMs, signal) {
+  async converse(text2, timeoutMs, signal, screen2) {
     await this.ensureConnected();
     const heardBefore = this.queue.splice(0).map((u) => u.text);
-    const said = await this.say(text2, signal);
-    const stopped = said.status === "skipped" || said.status === "ended" || said.status === "cancelled" || said.status === "failed";
-    if (stopped) {
+    const { said, reply, repeats } = await this.ask(text2, screen2 ? { screen: screen2 } : void 0, timeoutMs, signal);
+    if (!reply) {
       if (said.status === "skipped") this.skipRequested = false;
-      return { said, heardBefore, reply: { status: said.status === "failed" ? "disconnected" : said.status, text: "", parts: [] } };
+      return { said, heardBefore, reply: { status: said.status === "failed" ? "disconnected" : said.status, text: "", parts: [] }, repeats };
     }
-    return { said, heardBefore, reply: await this.collectReply(timeoutMs, signal) };
+    return { said, heardBefore, reply, repeats };
   }
   /**
    * Asks a whole round of questions back to back, acknowledging each answer
    * at once, so Claude thinks only once per round instead of once per question.
    */
-  async interview(questions, timeoutMs, signal) {
+  async interview(questions, timeoutMs, signal, screen2) {
     await this.ensureConnected();
     const heardBefore = this.queue.splice(0).map((u) => u.text);
     const answers = [];
     for (const [i, question] of questions.entries()) {
       const unasked = () => questions.slice(i + 1);
-      const said = await this.say(question, signal);
+      const { said, reply, repeats } = await this.ask(question, { screen: screen2, question: i + 1, of: questions.length }, timeoutMs, signal);
       if (said.status === "skipped") {
         this.skipRequested = false;
-        answers.push({ question, status: "skipped", answer: "", interrupted: false });
+        answers.push({ question, status: "skipped", answer: "", interrupted: false, repeats });
         continue;
       }
-      if (said.status === "ended" || said.status === "cancelled" || said.status === "failed") {
-        answers.push({ question, status: said.status === "failed" ? "disconnected" : said.status, answer: "", interrupted: false });
+      if (!reply) {
+        const status = said.status === "failed" ? "disconnected" : said.status === "ended" ? "ended" : "cancelled";
+        answers.push({ question, status, answer: "", interrupted: false, repeats });
         return { heardBefore, answers, unasked: unasked() };
       }
-      const reply = await this.collectReply(timeoutMs, signal);
-      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === "interrupted" });
+      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === "interrupted", repeats });
       if (reply.status === "ended" || reply.status === "cancelled" || reply.status === "disconnected") {
         return { heardBefore, answers, unasked: unasked() };
       }
@@ -41057,13 +41067,6 @@ var VoiceSession = class {
     this.touch();
     return true;
   }
-  updateMap(patch) {
-    const base = this.map ?? { decided: [], blocked: [], fog: [], updatedAt: 0 };
-    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== void 0));
-    this.map = { ...base, ...defined, updatedAt: this.now() };
-    this.provider?.setVocabulary(this.vocabulary());
-    this.changed();
-  }
   state(sinceRev) {
     if (sinceRev === this.rev) return { v: PROTOCOL_VERSION, rev: this.rev, unchanged: true };
     return {
@@ -41083,7 +41086,7 @@ var VoiceSession = class {
       warning: this.warning,
       error: this.error,
       transcript: this.lines.slice(-40),
-      map: this.map
+      card: this.card
     };
   }
   summary() {
@@ -41339,35 +41342,68 @@ var VoiceSession = class {
     );
   }
   // ---- helpers -------------------------------------------------------------
-  /** Says "heard you" at once, and "one moment" if Claude then takes a while. */
+  /** Says "heard you" at once, then the thinking cue if Claude takes a while. */
   acknowledge() {
     const clips = this.deps.clips;
-    if (!clips) return;
-    const ready = (this.deps.acknowledgements ?? []).filter((t) => clips.get(t));
+    const ready = clips ? (this.deps.acknowledgements ?? []).filter((t) => clips.get(t)) : [];
     if (ready.length) {
       const choices = ready.length > 1 ? ready.filter((t) => t !== this.lastAck) : ready;
       const text2 = choices[Math.floor(Math.random() * choices.length)];
       this.lastAck = text2;
-      this.playClip(text2);
+      this.playPcm(clips.get(text2), text2);
     }
-    const cue = this.deps.thinkingCue;
-    if (cue && clips.get(cue.text)) {
-      clearTimeout(this.cueTimer);
-      this.cueTimer = setTimeout(() => {
-        if (this.provider && !this.speech && !this.awaiting && !this.userSpeaking) this.playClip(cue.text);
-      }, cue.afterMs);
-      this.cueTimer.unref?.();
-    }
+    this.startThinkingCue();
   }
-  playClip(text2) {
-    const pcm = this.deps.clips?.get(text2);
-    if (!pcm || !this.audio || this.speech) return;
+  startThinkingCue() {
+    const cue = this.deps.thinkingCue;
+    if (!cue) return;
+    clearTimeout(this.cueTimer);
+    let played = 0;
+    const fire = () => {
+      if (!this.provider || this.speech || this.awaiting || this.userSpeaking) return;
+      const pcm = cue.pcm ?? (cue.text ? this.deps.clips?.get(cue.text) : void 0);
+      if (pcm) this.playPcm(pcm, cue.text ?? "thinking tone");
+      played++;
+      if (cue.repeatMs && played < (cue.maxTimes ?? 4)) {
+        this.cueTimer = setTimeout(fire, cue.repeatMs);
+        this.cueTimer.unref?.();
+      }
+    };
+    this.cueTimer = setTimeout(fire, cue.afterMs);
+    this.cueTimer.unref?.();
+  }
+  playPcm(pcm, label) {
+    if (!this.audio || this.speech) return;
     this.clipSeq = this.audio.play(pcm);
-    this.deps.log?.timing({ what: "clip", text: text2, afterReplyMs: this.lastReplyAt === void 0 ? -1 : this.now() - this.lastReplyAt });
+    this.deps.log?.timing({ what: "clip", text: label, afterReplyMs: this.lastReplyAt === void 0 ? -1 : this.now() - this.lastReplyAt });
+  }
+  /**
+   * Speaks a question and collects the answer. "I didn't catch that" is no
+   * answer: the question is asked again, a little slower, until one comes.
+   */
+  async ask(question, card, timeoutMs, signal) {
+    let repeats = 0;
+    let text2 = question;
+    for (; ; ) {
+      const said = await this.say(text2, signal, card, repeats > 0);
+      if (said.status === "skipped" || said.status === "ended" || said.status === "cancelled" || said.status === "failed") {
+        return { said, repeats, reply: void 0 };
+      }
+      const reply = await this.collectReply(timeoutMs, signal);
+      if (reply.status === "replied" && repeats < MAX_REPEATS && isRepeatRequest(reply.text)) {
+        repeats++;
+        this.deps.log?.timing({ what: "repeat", n: repeats });
+        text2 = `\u0E44\u0E14\u0E49\u0E04\u0E48\u0E30 ${question}`;
+        continue;
+      }
+      if (reply.status === "replied") this.acknowledge();
+      return { said, repeats, reply };
+    }
   }
   warmClips(provider) {
     const clips = this.deps.clips;
-    const texts = [...this.deps.acknowledgements ?? [], ...this.deps.thinkingCue ? [this.deps.thinkingCue.text] : []];
+    const cueText = this.deps.thinkingCue && !this.deps.thinkingCue.pcm ? this.deps.thinkingCue.text : void 0;
+    const texts = [...this.deps.acknowledgements ?? [], ...cueText ? [cueText] : []];
     if (!clips || !texts.length) return;
     clips.warm(texts, (t) => provider.synthesize(t)).catch((err) => this.warn(`Acknowledgement clips not ready: ${err.message}`));
   }
@@ -41415,7 +41451,6 @@ var VoiceSession = class {
         const quietEnough = typed || this.now() - lastHeardAt >= this.deps.endOfReplyMs;
         if (parts.length && !busy && quietEnough) {
           this.lastReplyAt = this.now();
-          this.acknowledge();
           return result("replied");
         }
         if (!parts.length && !busy && this.now() >= deadline) return result("timeout");
@@ -41436,9 +41471,7 @@ var VoiceSession = class {
     return "idle";
   }
   vocabulary() {
-    const titles = [this.map?.current, ...this.map?.decided ?? [], ...this.map?.blocked ?? []].filter((t) => t !== void 0).map((t) => t.title);
-    const fromTitles = titles.flatMap((t) => t.match(/[A-Za-z][A-Za-z0-9.+#_-]{2,}/g) ?? []);
-    return [.../* @__PURE__ */ new Set([...this.deps.baseVocabulary, ...fromTitles])];
+    return [...new Set(this.deps.baseVocabulary)];
   }
   addLine(who, text2, extra = {}) {
     const line = { ...extra, id: this.nextLineId++, at: this.now(), who, text: text2 };
@@ -41462,6 +41495,35 @@ var VoiceSession = class {
   }
 };
 
+// bridge/src/tone.ts
+var RATE = 24e3;
+var CHORD = [
+  { hz: 220, gain: 1 },
+  { hz: 277.18, gain: 0.55 },
+  { hz: 329.63, gain: 0.6 },
+  { hz: 440, gain: 0.35 },
+  { hz: 659.26, gain: 0.12 }
+];
+function waveTone({ durationMs = 1400, volume = 0.12 } = {}) {
+  const n = Math.round(durationMs / 1e3 * RATE);
+  const out = Buffer.alloc(n * 2);
+  const total = CHORD.reduce((s, p) => s + p.gain, 0) * 2;
+  for (let i = 0; i < n; i++) {
+    const t = i / RATE;
+    const x = i / (n - 1);
+    const swell = Math.sin(Math.PI * x) ** 2;
+    const ripple = 0.85 + 0.15 * Math.sin(2 * Math.PI * 2.2 * t);
+    let v = 0;
+    for (const p of CHORD) {
+      v += p.gain * Math.sin(2 * Math.PI * p.hz * t);
+      v += p.gain * Math.sin(2 * Math.PI * p.hz * 1.003 * t + 0.6);
+    }
+    const sample = v / total * swell * ripple * volume;
+    out.writeInt16LE(Math.round(Math.max(-1, Math.min(1, sample)) * 32767), i * 2);
+  }
+  return out;
+}
+
 // bridge/src/version.ts
 import { execFile } from "node:child_process";
 var MIN_CLAUDE_CODE = "2.1.287";
@@ -41480,19 +41542,24 @@ function checkClaudeCodeVersion() {
       const found = /(\d+\.\d+\.\d+)/.exec(stdout ?? "")?.[1];
       if (err || !found) return resolve2(void 0);
       resolve2(
-        compareVersions(found, MIN_CLAUDE_CODE) < 0 ? `Claude Code ${found} is older than ${MIN_CLAUDE_CODE}, which voice-wayfinder needs for its map pane. Run: claude update` : void 0
+        compareVersions(found, MIN_CLAUDE_CODE) < 0 ? `Claude Code ${found} is older than ${MIN_CLAUDE_CODE}, which voice-wayfinder needs for its voice pane. Run: claude update` : void 0
       );
     });
   });
 }
 
 // bridge/src/main.ts
-var VERSION = "0.1.0";
+var VERSION = "0.2.0";
 var pluginRoot = process.env.CLAUDE_PLUGIN_ROOT ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
 var cfg = loadConfig(pluginRoot);
 var apiKey = process.env[cfg.openai.apiKeyEnv];
 delete process.env[cfg.openai.apiKeyEnv];
 delete process.env.BWS_ACCESS_TOKEN;
+function thinkingCue() {
+  const { thinkingCue: cue, thinkingCueAfterMs: afterMs, thinkingCueRepeatMs: repeatMs } = cfg.conversation;
+  if (!cue) return void 0;
+  return cue === "tone" ? { pcm: waveTone(), afterMs, repeatMs } : { text: cue, afterMs, repeatMs };
+}
 var session = new VoiceSession({
   createProvider: () => {
     if (!apiKey) {
@@ -41509,7 +41576,7 @@ var session = new VoiceSession({
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
   minUtteranceMs: cfg.conversation.minUtteranceMs,
   acknowledgements: cfg.conversation.acknowledgements,
-  thinkingCue: cfg.conversation.thinkingCue ? { text: cfg.conversation.thinkingCue, afterMs: cfg.conversation.thinkingCueAfterMs } : void 0,
+  thinkingCue: thinkingCue(),
   // Anything that changes how a clip sounds is part of its cache key.
   clips: new ClipCache(defaultClipDir(), [cfg.openai.model, cfg.openai.voice, cfg.openai.speed, cfg.openai.instructions ?? DEFAULT_INSTRUCTIONS].join("|")),
   idleDisconnectMs: cfg.session.idleDisconnectMin * 6e4,
@@ -41544,7 +41611,7 @@ var describeSay = (r) => {
     case "interrupted":
       return `The person interrupted after ${(r.spokenMs / 1e3).toFixed(1)}s. Treat what they say next as the new input: call voice_listen.`;
     case "skipped":
-      return 'The person pressed "skip question" in the map pane. Move on without an answer.';
+      return 'The person pressed "skip question" in the voice pane. Move on without an answer.';
     case "ended":
       return "The person ended the voice session. Continue in text.";
     case "cancelled":
@@ -41570,6 +41637,9 @@ var describeReply = (r) => {
   }
 };
 var timeoutSec = external_exports.number().int().min(5).max(900).optional().describe(`How long to wait for the person to start speaking (default ${cfg.conversation.replyTimeoutSec}s).`);
+var screen = external_exports.string().max(6e3).optional().describe(
+  'Markdown shown in the voice pane while you ask: the full question, numbered answer choices and your recommendation. The person reads it and answers by voice or by typing (e.g. "2"). Speak only the short version.'
+);
 server.registerTool(
   "voice_say",
   {
@@ -41595,15 +41665,17 @@ server.registerTool(
     description: "Speak a question in Thai, then wait for the person's spoken reply and return its transcript. Handles barge-in: if they interrupt, speech stops and the interruption is treated as their reply. The main tool for grilling and decision turns.",
     inputSchema: {
       text: external_exports.string().min(1).max(2e3).describe("One question, in short natural spoken Thai. No code, tables, lists or URLs."),
+      screen,
       timeoutSec
     }
   },
-  ({ text: t, timeoutSec: s }, extra) => guarded(
+  ({ text: t, screen: card, timeoutSec: s }, extra) => guarded(
     extra,
-    () => session.converse(t, (s ?? cfg.conversation.replyTimeoutSec) * 1e3, extra.signal),
+    () => session.converse(t, (s ?? cfg.conversation.replyTimeoutSec) * 1e3, extra.signal, card),
     (r) => {
       const lines = [];
       if (r.heardBefore.length) lines.push(`Before this question the person had also said: ${r.heardBefore.join(" ")}`);
+      if (r.repeats) lines.push(`The person asked to hear the question again; it was repeated ${r.repeats} time(s) before this answer.`);
       if (r.said.status !== "completed") lines.push(describeSay(r.said));
       if (r.said.status === "completed" || r.said.status === "interrupted") lines.push(describeReply(r.reply));
       return text(lines.join("\n"), r);
@@ -41617,19 +41689,23 @@ server.registerTool(
     description: "Ask a whole round of independent questions by voice, back to back: each is spoken, the person's reply is captured and acknowledged at once, then the next question follows with no wait for you. Returns every answer. Use it for a grilling round; use voice_converse for a single question or a follow-up that depends on an answer.",
     inputSchema: {
       questions: external_exports.array(external_exports.string().min(1).max(600)).min(1).max(8).describe("Each question in short natural spoken Thai, worded so a yes accepts your recommendation. No code, tables, lists or URLs."),
+      screen: screen.describe(
+        "Markdown for the whole round, shown in the voice pane while it runs: each question numbered (Q1, Q2, \u2026) with its choices and your recommendation. The pane marks which one is being asked."
+      ),
       timeoutSec
     }
   },
-  ({ questions, timeoutSec: s }, extra) => guarded(
+  ({ questions, screen: card, timeoutSec: s }, extra) => guarded(
     extra,
-    () => session.interview(questions, (s ?? cfg.conversation.replyTimeoutSec) * 1e3, extra.signal),
+    () => session.interview(questions, (s ?? cfg.conversation.replyTimeoutSec) * 1e3, extra.signal, card),
     (r) => {
       const lines = [];
       if (r.heardBefore.length) lines.push(`Before the round the person had also said: ${r.heardBefore.join(" ")}`);
       r.answers.forEach((a, i) => {
         const heard = a.status === "replied" ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [] })})`;
+        const notes = [a.interrupted && "they cut in while it was being asked", a.repeats && `asked to hear it again, repeated ${a.repeats}\xD7`].filter(Boolean);
         lines.push(`Q${i + 1}: ${a.question}
-A${i + 1}${a.interrupted ? " (they cut in while it was being asked)" : ""}: ${heard}`);
+A${i + 1}${notes.length ? ` (${notes.join("; ")})` : ""}: ${heard}`);
       });
       if (r.unasked.length) lines.push(`Not asked: ${r.unasked.join(" | ")}`);
       lines.push("Answers are Thai speech, transcribed; English terms may be misheard.");
@@ -41641,11 +41717,13 @@ server.registerTool(
   "voice_status",
   {
     title: "Voice status",
-    description: 'Report whether the voice session is off, idle, listening, hearing or speaking, plus cost so far and any problem. detail "full" is for the map pane.',
+    description: 'Report whether the voice session is off, idle, listening, hearing or speaking, plus cost so far and any problem. detail "full" is for the voice pane.',
     inputSchema: {
       detail: external_exports.enum(["summary", "full"]).optional(),
       sinceRev: external_exports.number().int().optional().describe("Full detail only: answer { unchanged: true } when the state is still at this revision.")
-    }
+    },
+    // It only reads the bridge's state. Marked so, auto mode lets the pane poll it.
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   },
   async ({ detail, sinceRev }) => {
     if (detail !== "full") return text(session.summary());
@@ -41653,35 +41731,11 @@ server.registerTool(
     return text(JSON.stringify(state), state);
   }
 );
-var ticket = external_exports.object({
-  title: external_exports.string(),
-  url: external_exports.string().optional(),
-  type: external_exports.enum(["grilling", "prototype", "research", "task"]).optional()
-});
-server.registerTool(
-  "voice_map_update",
-  {
-    title: "Update map pane",
-    description: "Tell the map pane what the Wayfinder map looks like, read from the issue tracker (wayfinder:map issue and its child tickets). Send only the fields that changed; arrays replace. Ticket titles also teach the speech recogniser their terms.",
-    inputSchema: {
-      mapTitle: external_exports.string().optional(),
-      mapUrl: external_exports.string().optional(),
-      current: ticket.optional().describe("The ticket this session has claimed."),
-      decided: external_exports.array(ticket).optional().describe("Closed tickets (Decisions so far)."),
-      blocked: external_exports.array(ticket).optional().describe("Open tickets still blocked by others."),
-      fog: external_exports.array(external_exports.string()).optional().describe('One line per patch of "Not yet specified".')
-    }
-  },
-  async (patch) => {
-    session.updateMap(patch);
-    return text("Map pane updated.");
-  }
-);
 server.registerTool(
   "voice_control",
   {
     title: "Voice control",
-    description: 'Mute or unmute the microphone, skip the current question, or end the voice session. The map pane buttons call this too, and the pane uses "type" to hand over what the person typed as their answer; you never need "type".',
+    description: 'Mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too, and the pane uses "type" to hand over what the person typed as their answer; you never need "type".',
     inputSchema: {
       action: external_exports.enum(["mute", "unmute", "skip", "end", "type"]),
       text: external_exports.string().max(4e3).optional().describe('With "type": what the person typed.')

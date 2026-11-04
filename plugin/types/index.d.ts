@@ -13,22 +13,13 @@ export type VoiceActivity =
   | 'muted'
   | 'error'
 
-export type TicketType = 'grilling' | 'prototype' | 'research' | 'task'
-
-export type MapTicket = {
-  title: string
-  url?: string
-  type?: TicketType
-}
-
-export type MapSnapshot = {
-  mapTitle?: string
-  mapUrl?: string
-  current?: MapTicket
-  decided: MapTicket[]
-  blocked: MapTicket[]
-  fog: string[]
-  updatedAt: number
+/** What Claude put on screen for the question in progress: its full text and choices. */
+export type VoiceCard = {
+  /** Markdown: the question, numbered choices, the recommendation. */
+  screen?: string
+  /** In a `voice_interview` round: which question is being asked, of how many. */
+  question?: number
+  of?: number
 }
 
 export type TranscriptLine = {
@@ -76,7 +67,7 @@ export type VoiceStateV1 = {
   warning?: string
   error?: string
   transcript: TranscriptLine[]
-  map?: MapSnapshot
+  card?: VoiceCard
 }
 
 /** What `voice_status` answers when the caller already holds `sinceRev`. */
@@ -85,7 +76,7 @@ export type VoiceStateUnchanged = { v: 1; rev: number; unchanged: true }
 /** `type` delivers text the person typed as their answer (with `text`). */
 export type VoiceControlAction = 'mute' | 'unmute' | 'skip' | 'end' | 'type'
 
-/** Whether the map pane can reach the bridge's MCP server. */
+/** Whether the pane can reach the bridge's MCP server. */
 export type BridgeLink = {
   status: 'connecting' | 'ok' | 'unreachable' | 'mismatch'
   message?: string
