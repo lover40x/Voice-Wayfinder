@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.env.*
+# Built per machine by plugin/scripts/build-audio.sh
+plugin/native/vw-audio/vw-audio
+# Written by Claude Code when it loads the mod
+plugin/.claude-plugin/types/

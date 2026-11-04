@@ -1,0 +1,12 @@
+{
+  "name": "voice-wayfinder-dev",
+  "owner": { "name": "Tan" },
+  "plugins": [
+    {
+      "name": "voice-wayfinder",
+      "source": "./plugin",
+      "description": "Full-duplex Thai voice front-end for /wayfinder: realtime voice MCP bridge, voice-mode rules and a live map pane.",
+      "version": "0.1.0"
+    }
+  ]
+}

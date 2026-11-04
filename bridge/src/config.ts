@@ -1,0 +1,72 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
+export type TurnDetection =
+  | { type: 'server_vad'; threshold: number; prefixPaddingMs: number; silenceDurationMs: number }
+  | { type: 'semantic_vad'; eagerness: 'low' | 'medium' | 'high' | 'auto' }
+
+export type OpenAIConfig = {
+  model: string
+  voice: string
+  speed: number
+  reasoningEffort: 'minimal' | 'low' | 'medium' | 'high' | null
+  apiKeyEnv: string
+  instructions?: string
+  transcription: { model: string; language: string; prompt?: string }
+  turnDetection: TurnDetection
+  noiseReduction: 'near_field' | 'far_field' | null
+  pricingUsd: { textInPerMTok: number; audioOutPerMTok: number; textOutPerMTok: number; transcriptionPerMin: number }
+}
+
+export type BridgeConfig = {
+  provider: 'openai-realtime'
+  openai: OpenAIConfig
+  audio: { echoCancellation: boolean }
+  conversation: {
+    endOfReplyMs: number
+    replyTimeoutSec: number
+    bargeInConfirmMs: number
+    minUtteranceMs: number
+    /** Short clips played the moment a reply is complete; [] turns them off. */
+    acknowledgements: string[]
+    /** Said once if Claude is still thinking this long after a reply; "" turns it off. */
+    thinkingCue: string
+    thinkingCueAfterMs: number
+  }
+  session: { idleDisconnectMin: number; refreshAfterMin: number }
+  vocabulary: string[]
+  logDir: string | null
+}
+
+/** Where a person's own overrides live; anything they set wins over plugin/config/defaults.json. */
+export const userConfigPath = () =>
+  process.env.VOICE_WAYFINDER_CONFIG ?? join(homedir(), '.config', 'voice-wayfinder', 'config.json')
+
+export function loadConfig(pluginRoot: string): BridgeConfig {
+  const defaults = JSON.parse(readFileSync(join(pluginRoot, 'config', 'defaults.json'), 'utf8'))
+  const path = userConfigPath()
+  const overrides = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {}
+  return deepMerge(defaults, overrides) as BridgeConfig
+}
+
+export function defaultClipDir(): string {
+  if (process.env.CLAUDE_PLUGIN_DATA) return join(process.env.CLAUDE_PLUGIN_DATA, 'clips')
+  return join(homedir(), 'Library', 'Caches', 'voice-wayfinder', 'clips')
+}
+
+export function defaultLogDir(): string {
+  if (process.env.CLAUDE_PLUGIN_DATA) return join(process.env.CLAUDE_PLUGIN_DATA, 'transcripts')
+  return join(homedir(), 'Library', 'Logs', 'voice-wayfinder')
+}
+
+function deepMerge(base: unknown, over: unknown): unknown {
+  if (!isObject(base) || !isObject(over)) return over === undefined ? base : over
+  const out: Record<string, unknown> = { ...base }
+  for (const [k, v] of Object.entries(over)) out[k] = deepMerge(base[k], v)
+  return out
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}

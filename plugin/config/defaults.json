@@ -1,0 +1,49 @@
+{
+  "provider": "openai-realtime",
+  "openai": {
+    "model": "gpt-realtime-2.1",
+    "voice": "marin",
+    "speed": 1.2,
+    "reasoningEffort": "minimal",
+    "apiKeyEnv": "OPENAI_REALTIME_API_KEY",
+    "transcription": {
+      "model": "gpt-4o-transcribe",
+      "language": "th"
+    },
+    "turnDetection": {
+      "type": "server_vad",
+      "threshold": 0.6,
+      "prefixPaddingMs": 300,
+      "silenceDurationMs": 500
+    },
+    "noiseReduction": "near_field",
+    "pricingUsd": {
+      "textInPerMTok": 4,
+      "audioOutPerMTok": 64,
+      "textOutPerMTok": 16,
+      "transcriptionPerMin": 0.006
+    }
+  },
+  "audio": {
+    "echoCancellation": true
+  },
+  "conversation": {
+    "endOfReplyMs": 900,
+    "replyTimeoutSec": 180,
+    "bargeInConfirmMs": 250,
+    "minUtteranceMs": 300,
+    "acknowledgements": ["ค่ะ", "รับทราบค่ะ", "โอเคค่ะ"],
+    "thinkingCue": "ขอคิดแป๊บนึงนะคะ",
+    "thinkingCueAfterMs": 4000
+  },
+  "session": {
+    "idleDisconnectMin": 10,
+    "refreshAfterMin": 50
+  },
+  "vocabulary": [
+    "Wayfinder", "Claude Code", "ticket", "map", "grilling", "prototype", "research", "task",
+    "issue", "GitHub", "pull request", "API", "MCP", "plugin", "mod", "skill", "frontend",
+    "backend", "deploy", "database", "schema", "spec", "Supabase", "Vercel", "Next.js"
+  ],
+  "logDir": null
+}

@@ -1,0 +1,15 @@
+{
+  "name": "voice-wayfinder",
+  "version": "0.1.0",
+  "description": "Full-duplex Thai voice front-end for /wayfinder: a realtime voice MCP bridge, voice-mode rules and a live map pane.",
+  "author": { "name": "Tan" },
+  "license": "UNLICENSED",
+  "keywords": ["voice", "wayfinder", "realtime", "thai"],
+  "types": "./types/index.d.ts",
+  "mcpServers": {
+    "voice": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/start-bridge.sh",
+      "args": []
+    }
+  }
+}

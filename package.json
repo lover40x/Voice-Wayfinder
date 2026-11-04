@@ -1,0 +1,29 @@
+{
+  "name": "voice-wayfinder-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Workspace for the voice-wayfinder Claude Code plugin: realtime voice bridge, Wayfinder voice rules and map mod.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "npm run build:bridge && npm run build:audio",
+    "build:bridge": "esbuild bridge/src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=plugin/server/bridge.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
+    "build:audio": "sh plugin/scripts/build-audio.sh",
+    "typecheck": "tsc -p bridge",
+    "test": "node --test 'bridge/test/*.test.ts'",
+    "validate": "claude plugin validate plugin && claude plugin validate .",
+    "test:mod": "claude plugin test plugin",
+    "check": "npm run typecheck && npm test && npm run build && npm run validate && npm run test:mod"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/node": "^22.18.0",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "ws": "^8.22.1",
+    "zod": "^4.6.7"
+  }
+}

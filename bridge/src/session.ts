@@ -1,0 +1,613 @@
+import { randomUUID } from 'node:crypto'
+
+import {
+  PROTOCOL_VERSION,
+  type MapSnapshot,
+  type TranscriptLine,
+  type VoiceActivity,
+  type VoiceControlAction,
+  type VoiceStateUnchanged,
+  type VoiceStateV1,
+} from '../../plugin/shared/protocol.ts'
+import type { AudioDevice, AudioEvent } from './audio.ts'
+import type { ClipCache } from './clips.ts'
+import type { TranscriptLog } from './log.ts'
+import type { ProviderEvent, VoiceProvider } from './provider.ts'
+
+export type SessionDeps = {
+  createProvider: () => VoiceProvider
+  createAudio: () => AudioDevice
+  log?: TranscriptLog
+  endOfReplyMs: number
+  idleDisconnectMs: number
+  refreshAfterMs: number
+  baseVocabulary: readonly string[]
+  /** Speech must last this long before it stops Claude (noise bursts don't). */
+  bargeInConfirmMs?: number
+  /** Utterances shorter than this are treated as noise and dropped. */
+  minUtteranceMs?: number
+  /** Played the instant a reply is complete, so the person hears they were heard. */
+  acknowledgements?: readonly string[]
+  /** Played once when Claude has not spoken this long after a reply. */
+  thinkingCue?: { text: string; afterMs: number }
+  clips?: ClipCache
+  now?: () => number
+  tickMs?: number
+}
+
+export type SayStatus = 'completed' | 'interrupted' | 'cancelled' | 'failed' | 'skipped' | 'ended'
+export type SayResult = { status: SayStatus; spokenMs: number; detail?: string }
+
+export type ReplyStatus = 'replied' | 'timeout' | 'skipped' | 'ended' | 'cancelled' | 'disconnected'
+export type ReplyResult = { status: ReplyStatus; text: string; parts: string[] }
+
+export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult }
+
+export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean }
+export type InterviewResult = { heardBefore: string[]; answers: InterviewAnswer[]; unasked: string[] }
+
+type ActiveSpeech = {
+  id: string
+  lineId: number
+  requestedAt: number
+  firstAudioAt?: number
+  lastSeq: number
+  generated: boolean
+  bytesAtSeq: Map<number, number>
+  sentBytes: number
+  playedBytes: number
+  finish: (status: SayStatus, detail?: string) => void
+}
+
+type Utterance = { text: string; at: number }
+
+const BYTES_PER_MS = 48 // PCM16 mono 24 kHz
+const MAX_LINES = 200
+
+/**
+ * One long-lived voice conversation. The provider is the ears and mouth; every
+ * decision stays with Claude Code, which drives this through the MCP tools.
+ */
+export class VoiceSession {
+  private provider?: VoiceProvider
+  private audio?: AudioDevice
+  private connecting?: Promise<void>
+  private speech?: ActiveSpeech
+  private queue: Utterance[] = []
+  private pending = new Set<string>()
+  private userSpeaking = false
+  private awaiting = false
+  private muted = false
+  private skipRequested = false
+  private endRequested = false
+  private lines: TranscriptLine[] = []
+  private nextLineId = 1
+  private map?: MapSnapshot
+  private rev = 1
+  private cost = 0
+  private startedAt?: number
+  private lastActivityAt = 0
+  private warning?: string
+  private error?: string
+  private readonly now: () => number
+  private readonly tickMs: number
+  private timer?: NodeJS.Timeout
+  private audioRestarts: number[] = []
+  private bargeInTimer?: NodeJS.Timeout
+  private heard = new Map<string, { durationMs?: number; stoppedAt: number }>()
+  private lastReplyAt?: number
+  private clipSeq?: number
+  private lastAck?: string
+  private cueTimer?: NodeJS.Timeout
+  private readonly deps: SessionDeps
+
+  constructor(deps: SessionDeps) {
+    this.deps = deps
+    this.now = deps.now ?? Date.now
+    this.tickMs = deps.tickMs ?? 50
+  }
+
+  // ---- tools ---------------------------------------------------------------
+
+  async say(text: string, signal?: AbortSignal): Promise<SayResult> {
+    await this.ensureConnected()
+    const provider = this.provider!
+    if (this.speech) this.stopSpeech('cancelled')
+    clearTimeout(this.cueTimer)
+    const line = this.addLine('claude', text)
+    const requestedAt = this.now()
+    if (this.lastReplyAt !== undefined) {
+      this.deps.log?.timing({ what: 'claude-turn', ms: requestedAt - this.lastReplyAt })
+      this.lastReplyAt = undefined
+    }
+    return new Promise<SayResult>(resolve => {
+      const speech: ActiveSpeech = {
+        id: provider.say(text),
+        lineId: line.id,
+        requestedAt,
+        lastSeq: -1,
+        generated: false,
+        bytesAtSeq: new Map(),
+        sentBytes: 0,
+        playedBytes: 0,
+        finish: (status, detail) => {
+          if (this.speech !== speech) return
+          this.speech = undefined
+          signal?.removeEventListener('abort', onAbort)
+          if (status !== 'completed') this.markLine(speech.lineId, { interrupted: true })
+          this.deps.log?.timing({
+            what: 'speech',
+            status,
+            firstAudioMs: speech.firstAudioAt === undefined ? -1 : speech.firstAudioAt - speech.requestedAt,
+            playedMs: Math.round(speech.playedBytes / BYTES_PER_MS),
+            totalMs: this.now() - speech.requestedAt,
+          })
+          this.touch()
+          resolve({ status, spokenMs: Math.round(speech.playedBytes / BYTES_PER_MS), detail })
+        },
+      }
+      const onAbort = () => this.stopSpeech('cancelled')
+      signal?.addEventListener('abort', onAbort)
+      this.speech = speech
+      this.touch()
+    })
+  }
+
+  async listen(timeoutMs: number, signal?: AbortSignal): Promise<ReplyResult> {
+    await this.ensureConnected()
+    return this.collectReply(timeoutMs, signal)
+  }
+
+  async converse(text: string, timeoutMs: number, signal?: AbortSignal): Promise<ConverseResult> {
+    await this.ensureConnected()
+    const heardBefore = this.queue.splice(0).map(u => u.text)
+    const said = await this.say(text, signal)
+    const stopped = said.status === 'skipped' || said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed'
+    if (stopped) {
+      if (said.status === 'skipped') this.skipRequested = false
+      return { said, heardBefore, reply: { status: said.status === 'failed' ? 'disconnected' : (said.status as ReplyStatus), text: '', parts: [] } }
+    }
+    return { said, heardBefore, reply: await this.collectReply(timeoutMs, signal) }
+  }
+
+  /**
+   * Asks a whole round of questions back to back, acknowledging each answer
+   * at once, so Claude thinks only once per round instead of once per question.
+   */
+  async interview(questions: readonly string[], timeoutMs: number, signal?: AbortSignal): Promise<InterviewResult> {
+    await this.ensureConnected()
+    const heardBefore = this.queue.splice(0).map(u => u.text)
+    const answers: InterviewAnswer[] = []
+    for (const [i, question] of questions.entries()) {
+      const unasked = () => questions.slice(i + 1)
+      const said = await this.say(question, signal)
+      if (said.status === 'skipped') {
+        this.skipRequested = false
+        answers.push({ question, status: 'skipped', answer: '', interrupted: false })
+        continue
+      }
+      if (said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed') {
+        answers.push({ question, status: said.status === 'failed' ? 'disconnected' : said.status, answer: '', interrupted: false })
+        return { heardBefore, answers, unasked: unasked() }
+      }
+      const reply = await this.collectReply(timeoutMs, signal)
+      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === 'interrupted' })
+      if (reply.status === 'ended' || reply.status === 'cancelled' || reply.status === 'disconnected') {
+        return { heardBefore, answers, unasked: unasked() }
+      }
+    }
+    return { heardBefore, answers, unasked: [] }
+  }
+
+  control(action: VoiceControlAction): string {
+    switch (action) {
+      case 'mute':
+        this.muted = true
+        this.userSpeaking = false
+        this.provider?.clearInput()
+        this.touch()
+        return 'Microphone muted.'
+      case 'unmute':
+        this.muted = false
+        this.touch()
+        return 'Microphone on.'
+      case 'skip':
+        if (!this.speech && !this.awaiting) return 'Nothing to skip.'
+        this.skipRequested = true
+        if (this.speech) this.stopSpeech('skipped')
+        this.touch()
+        return 'Question skipped.'
+      case 'end':
+        this.endRequested = true
+        if (this.speech) this.stopSpeech('ended')
+        this.disconnect('Voice session ended.')
+        return 'Voice session ended.'
+    }
+  }
+
+  updateMap(patch: Partial<Omit<MapSnapshot, 'updatedAt'>>) {
+    const base: MapSnapshot = this.map ?? { decided: [], blocked: [], fog: [], updatedAt: 0 }
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined))
+    this.map = { ...base, ...defined, updatedAt: this.now() }
+    this.provider?.setVocabulary(this.vocabulary())
+    this.changed()
+  }
+
+  state(sinceRev?: number): VoiceStateV1 | VoiceStateUnchanged {
+    if (sinceRev === this.rev) return { v: PROTOCOL_VERSION, rev: this.rev, unchanged: true }
+    return {
+      v: PROTOCOL_VERSION,
+      rev: this.rev,
+      activity: this.activity(),
+      muted: this.muted,
+      awaitingReply: this.awaiting,
+      provider: this.provider?.name ?? 'openai-realtime',
+      model: this.provider?.model ?? '',
+      sessionStartedAt: this.startedAt,
+      estimatedCostUsd: Math.round(this.cost * 1000) / 1000,
+      queuedUtterances: this.queue.length,
+      warning: this.warning,
+      error: this.error,
+      transcript: this.lines.slice(-40),
+      map: this.map,
+    }
+  }
+
+  summary(): string {
+    const s = this.state() as VoiceStateV1
+    const parts: string[] = [s.activity]
+    if (s.sessionStartedAt) parts.push(`connected ${Math.round((this.now() - s.sessionStartedAt) / 60000)} min`)
+    parts.push(`est. $${s.estimatedCostUsd.toFixed(2)} this session`)
+    if (s.queuedUtterances) parts.push(`${s.queuedUtterances} unheard utterance(s) waiting: call voice_listen`)
+    if (s.muted) parts.push('mic muted')
+    if (s.error) parts.push(`error: ${s.error}`)
+    if (s.warning) parts.push(`warning: ${s.warning}`)
+    return parts.join('; ')
+  }
+
+  warn(message: string) {
+    this.warning = message
+    this.changed()
+  }
+
+  shutdown() {
+    clearInterval(this.timer)
+    this.disconnect('Bridge stopped.')
+  }
+
+  // ---- connection ----------------------------------------------------------
+
+  private async ensureConnected() {
+    if (this.provider) return
+    if (!this.connecting) {
+      this.connecting = this.connect().finally(() => {
+        this.connecting = undefined
+        this.changed()
+      })
+      this.changed()
+    }
+    await this.connecting
+  }
+
+  private async connect() {
+    this.endRequested = false
+    this.skipRequested = false
+    this.error = undefined
+    let provider: VoiceProvider | undefined
+    let audio: AudioDevice | undefined
+    try {
+      provider = this.deps.createProvider()
+      audio = this.deps.createAudio()
+      const p = provider
+      const a = audio
+      p.onEvent(e => this.onProvider(p, e))
+      a.onEvent(e => this.onAudio(a, e))
+      p.setVocabulary(this.vocabulary())
+      await a.start() // mic permission problems surface before any API cost
+      await p.connect()
+    } catch (err) {
+      provider?.close()
+      audio?.stop()
+      this.error = (err as Error).message
+      throw err
+    }
+    this.provider = provider
+    this.audio = audio
+    this.startedAt = this.now()
+    this.lastActivityAt = this.now()
+    this.deps.log?.begin(randomUUID(), { provider: provider.name, model: provider.model })
+    this.addLine('system', `Voice connected (${provider.model}).`)
+    this.warmClips(provider)
+    this.timer ??= setInterval(() => this.maintain(), 15_000)
+    this.timer.unref?.()
+  }
+
+  private disconnect(reason: string) {
+    const provider = this.provider
+    const audio = this.audio
+    if (!provider && !audio) return
+    this.provider = undefined
+    this.audio = undefined
+    clearTimeout(this.cueTimer)
+    this.clipSeq = undefined
+    if (this.speech) this.stopSpeech('failed', reason)
+    provider?.close()
+    audio?.stop()
+    this.userSpeaking = false
+    this.pending.clear()
+    this.startedAt = undefined
+    this.addLine('system', reason)
+    this.deps.log?.end(reason)
+  }
+
+  private maintain() {
+    if (!this.provider || this.speech || this.awaiting || this.userSpeaking) return
+    const now = this.now()
+    if (now - this.lastActivityAt > this.deps.idleDisconnectMs) this.disconnect('Disconnected after being idle (saves cost). It reconnects on the next question.')
+    else if (this.startedAt && now - this.startedAt > this.deps.refreshAfterMs) this.disconnect('Session refreshed before the provider time limit.')
+  }
+
+  // ---- events --------------------------------------------------------------
+
+  private onProvider(provider: VoiceProvider, e: ProviderEvent) {
+    if (provider !== this.provider && e.type !== 'speech.done') return
+    const speech = this.speech
+    switch (e.type) {
+      case 'speech.audio':
+        if (!speech || speech.id !== e.speechId || !this.audio) return
+        speech.firstAudioAt ??= this.now()
+        speech.sentBytes += e.pcm.length
+        speech.lastSeq = this.audio.play(e.pcm)
+        speech.bytesAtSeq.set(speech.lastSeq, speech.sentBytes)
+        return
+      case 'speech.done':
+        if (!speech || speech.id !== e.speechId) return
+        speech.generated = true
+        if (e.status === 'failed') speech.finish('failed', e.detail)
+        else if (e.status === 'cancelled') speech.finish('cancelled')
+        else if (speech.lastSeq < 0 || speech.playedBytes >= speech.sentBytes) speech.finish('completed')
+        return
+      case 'user.speech_started':
+        this.userSpeaking = true
+        clearTimeout(this.cueTimer)
+        this.touch()
+        // Barge-in: the person's voice wins over Claude's, once it is clearly speech.
+        if (this.speech) this.confirmBargeIn(this.speech)
+        else if (this.clipSeq !== undefined) {
+          this.audio?.flush()
+          this.clipSeq = undefined
+        }
+        return
+      case 'user.speech_stopped':
+        this.userSpeaking = false
+        clearTimeout(this.bargeInTimer)
+        if (e.itemId) this.heard.set(e.itemId, { durationMs: e.durationMs, stoppedAt: this.now() })
+        this.touch()
+        return
+      case 'user.transcript_pending':
+        this.pending.add(e.itemId)
+        this.changed()
+        return
+      case 'user.transcript': {
+        this.pending.delete(e.itemId)
+        const heard = this.heard.get(e.itemId)
+        this.heard.delete(e.itemId)
+        const durationMs = heard?.durationMs
+        const tooShort = durationMs !== undefined && durationMs < (this.deps.minUtteranceMs ?? 0)
+        if (heard) this.deps.log?.timing({ what: 'heard', speechMs: durationMs ?? -1, transcribeMs: this.now() - heard.stoppedAt, dropped: tooShort ? 'yes' : 'no' })
+        const text = e.text.trim()
+        if (text && !tooShort) {
+          this.queue.push({ text, at: this.now() })
+          this.addLine('user', text)
+        }
+        this.touch()
+        return
+      }
+      case 'user.transcript_failed':
+        this.pending.delete(e.itemId)
+        this.warning = `Could not transcribe one utterance: ${e.message}`
+        this.changed()
+        return
+      case 'usage':
+        this.cost += e.costUsd
+        this.changed()
+        return
+      case 'warning':
+        this.warning = e.message
+        this.changed()
+        return
+      case 'closed':
+        if (!e.isExpected) {
+          this.warning = `Voice connection closed (${e.reason}). It reconnects on the next call.`
+          this.disconnect('Voice connection lost.')
+        }
+        return
+    }
+  }
+
+  private onAudio(audio: AudioDevice, e: AudioEvent) {
+    if (audio !== this.audio) return
+    switch (e.type) {
+      case 'mic':
+        if (!this.muted) this.provider?.appendAudio(e.pcm)
+        return
+      case 'played': {
+        if (this.clipSeq !== undefined && e.seq >= this.clipSeq) this.clipSeq = undefined
+        const speech = this.speech
+        if (!speech) return
+        speech.playedBytes = speech.bytesAtSeq.get(e.seq) ?? speech.playedBytes
+        if (speech.generated && e.seq >= speech.lastSeq) speech.finish('completed')
+        return
+      }
+      case 'warning':
+        this.warning = e.message
+        this.changed()
+        return
+      case 'exit':
+        // Device change or crash: start a fresh helper and keep the session.
+        this.audio = undefined
+        if (this.speech) this.stopSpeech('failed', 'audio device changed')
+        this.restartAudio()
+        return
+      case 'ready':
+        return
+    }
+  }
+
+  private restartAudio() {
+    if (!this.provider) return
+    const now = this.now()
+    this.audioRestarts = this.audioRestarts.filter(t => now - t < 60_000)
+    if (this.audioRestarts.length >= 3) {
+      this.error = 'The audio device keeps failing. Check the microphone and speakers, then ask again.'
+      this.disconnect('Audio device unavailable.')
+      return
+    }
+    this.audioRestarts.push(now)
+    const audio = this.deps.createAudio()
+    audio.onEvent(e => this.onAudio(audio, e))
+    audio.start().then(
+      () => {
+        this.audio = audio
+        this.changed()
+      },
+      err => {
+        this.error = (err as Error).message
+        this.disconnect('Audio device unavailable.')
+      },
+    )
+  }
+
+  // ---- helpers -------------------------------------------------------------
+
+  /** Says "heard you" at once, and "one moment" if Claude then takes a while. */
+  private acknowledge() {
+    const clips = this.deps.clips
+    if (!clips) return
+    const ready = (this.deps.acknowledgements ?? []).filter(t => clips.get(t))
+    if (ready.length) {
+      const choices = ready.length > 1 ? ready.filter(t => t !== this.lastAck) : ready
+      const text = choices[Math.floor(Math.random() * choices.length)]!
+      this.lastAck = text
+      this.playClip(text)
+    }
+    const cue = this.deps.thinkingCue
+    if (cue && clips.get(cue.text)) {
+      clearTimeout(this.cueTimer)
+      this.cueTimer = setTimeout(() => {
+        if (this.provider && !this.speech && !this.awaiting && !this.userSpeaking) this.playClip(cue.text)
+      }, cue.afterMs)
+      this.cueTimer.unref?.()
+    }
+  }
+
+  private playClip(text: string) {
+    const pcm = this.deps.clips?.get(text)
+    if (!pcm || !this.audio || this.speech) return
+    this.clipSeq = this.audio.play(pcm)
+    this.deps.log?.timing({ what: 'clip', text, afterReplyMs: this.lastReplyAt === undefined ? -1 : this.now() - this.lastReplyAt })
+  }
+
+  private warmClips(provider: VoiceProvider) {
+    const clips = this.deps.clips
+    const texts = [...(this.deps.acknowledgements ?? []), ...(this.deps.thinkingCue ? [this.deps.thinkingCue.text] : [])]
+    if (!clips || !texts.length) return
+    clips.warm(texts, t => provider.synthesize(t)).catch(err => this.warn(`Acknowledgement clips not ready: ${(err as Error).message}`))
+  }
+
+  private confirmBargeIn(speech: ActiveSpeech) {
+    const wait = this.deps.bargeInConfirmMs ?? 0
+    if (wait <= 0) return this.stopSpeech('interrupted')
+    clearTimeout(this.bargeInTimer)
+    this.bargeInTimer = setTimeout(() => {
+      if (this.userSpeaking && this.speech === speech) this.stopSpeech('interrupted')
+    }, wait)
+  }
+
+  private stopSpeech(status: SayStatus, detail?: string) {
+    const speech = this.speech
+    if (!speech) return
+    this.audio?.flush()
+    this.provider?.interrupt(speech.id)
+    speech.finish(status, detail)
+  }
+
+  private async collectReply(timeoutMs: number, signal?: AbortSignal): Promise<ReplyResult> {
+    clearTimeout(this.cueTimer)
+    this.awaiting = true
+    this.changed()
+    const parts: string[] = []
+    const deadline = this.now() + timeoutMs
+    let lastHeardAt = this.now()
+    const result = (status: ReplyStatus): ReplyResult => ({ status, text: parts.join(' '), parts })
+    try {
+      for (;;) {
+        if (signal?.aborted) return result('cancelled')
+        if (this.endRequested) return result('ended')
+        if (this.skipRequested) {
+          this.skipRequested = false
+          return result('skipped')
+        }
+        if (!this.provider && !this.connecting) return result('disconnected')
+        while (this.queue.length) {
+          parts.push(this.queue.shift()!.text)
+          lastHeardAt = this.now()
+        }
+        const busy = this.userSpeaking || this.pending.size > 0
+        if (busy) lastHeardAt = this.now()
+        if (parts.length && !busy && this.now() - lastHeardAt >= this.deps.endOfReplyMs) {
+          this.lastReplyAt = this.now()
+          this.acknowledge()
+          return result('replied')
+        }
+        if (!parts.length && !busy && this.now() >= deadline) return result('timeout')
+        await new Promise(r => setTimeout(r, this.tickMs))
+      }
+    } finally {
+      this.awaiting = false
+      this.touch()
+    }
+  }
+
+  private activity(): VoiceActivity {
+    if (this.connecting) return 'connecting'
+    if (!this.provider) return this.error ? 'error' : 'off'
+    if (this.speech) return 'speaking'
+    if (this.muted) return 'muted'
+    if (this.userSpeaking) return 'hearing'
+    if (this.awaiting) return 'listening'
+    return 'idle'
+  }
+
+  private vocabulary(): string[] {
+    const titles = [this.map?.current, ...(this.map?.decided ?? []), ...(this.map?.blocked ?? [])]
+      .filter(t => t !== undefined)
+      .map(t => t.title)
+    const fromTitles = titles.flatMap(t => t.match(/[A-Za-z][A-Za-z0-9.+#_-]{2,}/g) ?? [])
+    return [...new Set([...this.deps.baseVocabulary, ...fromTitles])]
+  }
+
+  private addLine(who: TranscriptLine['who'], text: string): TranscriptLine {
+    const line: TranscriptLine = { id: this.nextLineId++, at: this.now(), who, text }
+    this.lines.push(line)
+    if (this.lines.length > MAX_LINES) this.lines.splice(0, this.lines.length - MAX_LINES)
+    this.deps.log?.line(line)
+    this.changed()
+    return line
+  }
+
+  private markLine(id: number, patch: Partial<TranscriptLine>) {
+    const i = this.lines.findIndex(l => l.id === id)
+    if (i >= 0) this.lines[i] = { ...this.lines[i]!, ...patch }
+    this.changed()
+  }
+
+  private touch() {
+    this.lastActivityAt = this.now()
+    this.changed()
+  }
+
+  private changed() {
+    this.rev++
+  }
+}
