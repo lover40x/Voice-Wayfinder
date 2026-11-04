@@ -69,7 +69,7 @@ async function connect($: EngineInterface): Promise<string | undefined> {
 /** A refusal from auto mode reads as an instruction, not a stack of jargon. */
 function explain(message: string): string {
   if (/auto mode|classifier|permission/i.test(message)) {
-    return "Claude Code's permission check blocked the pane from reading the voice bridge. Allow voice-wayfinder's voice tools (README: Permissions), then start a new session."
+    return "Claude Code's permission check blocked the pane from reading the voice bridge. Run npm run setup in the plugin's folder (or see README: Allow the voice tools), then start a new session."
   }
   return message
 }

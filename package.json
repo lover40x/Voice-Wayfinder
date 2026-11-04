@@ -9,6 +9,8 @@
     "node": ">=22.18"
   },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "setup:check": "node scripts/setup.mjs --check",
     "build": "npm run build:bridge && npm run build:audio",
     "build:bridge": "esbuild bridge/src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=plugin/server/bridge.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
     "build:audio": "sh plugin/scripts/build-audio.sh",

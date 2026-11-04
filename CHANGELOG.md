@@ -4,6 +4,7 @@ All notable changes to the voice-wayfinder plugin. Versions follow semantic vers
 
 ## 0.2.0
 
+- One-command setup: `npm run setup` checks the Mac, builds, stores the Bitwarden token in the Keychain, checks the OpenAI key arrives, installs the plugin and (after asking, with a backup) adds the voice tools allow rule to `~/.claude/settings.json`. `npm run setup:check` only reports. The README starts with a four-step quick start.
 - The thinking cue is a soft harmonic tone made locally (a chord with a slow swell and shimmer), after 3 s and again every 8 s while Claude still thinks, instead of the same spoken words every time. `thinkingCue: "<text>"` still speaks a line instead; `""` turns it off.
 - "ฟังไม่ทัน", "อีกที", "อะไรนะ", "repeat" and the like are no longer taken as the answer: the question is asked again, a little slower (up to 3 times), and the results say how often (`repeats`). Short utterances only, so a real answer that contains "again" still counts.
 - The pane is now a live voice conversation, not a map: the question card Claude sends as `screen` (full question, numbered choices, recommendation; "Question 2 of 5" during a round), what Claude is saying, your words live as you speak, and the conversation. Answer by voice or by typing a choice.

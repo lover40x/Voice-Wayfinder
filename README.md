@@ -18,22 +18,60 @@ you ⇄ vw-audio (mic + speaker, macOS echo cancellation)
 | Mod | `plugin/hooks/register.tsx` | The voice pane, the captions above the prompt and a status line; hands typed answers to the bridge. It reads the bridge through its MCP tools and never approves tools or changes permissions. |
 | Message format | `plugin/types/index.d.ts` (protocol v1) | The one versioned format the three parts share. |
 
-## Requirements
+## Quick start
 
-- macOS, Claude Code 2.1.287 or later (`claude --version`; the pane and the bridge both warn when it is older).
-- Node 22.18+, Xcode command line tools (`xcrun swiftc`), the Bitwarden Secrets Manager CLI `bws`.
-- An OpenAI API key with Realtime access, in its own OpenAI project so its cost is tracked and it can be revoked alone.
-- Microphone permission for the app that runs Claude Code (macOS asks the first time).
+About ten minutes, most of it in Bitwarden.
 
-## Setup
+### 1. Have these
 
-### 1. Get it and build
+- A Mac with [Claude Code](https://claude.com/claude-code) 2.1.287 or later, [Node](https://nodejs.org) 22.18+, and the Xcode command line tools (`xcode-select --install`).
+- The Bitwarden Secrets Manager CLI, [`bws`](https://bitwarden.com/help/secrets-manager-cli/).
+- An OpenAI API key with Realtime access. Make it in its own OpenAI project, so its cost shows on its own and you can revoke it alone.
+- Matt Pocock's skills (`mattpocock-skills` 1.3.1+, which has `/wayfinder`), installed with `/plugin` from the `mattpocock/skills` marketplace.
 
-The plugin runs from a local clone: the audio helper is compiled on your Mac.
+### 2. Make four things in Bitwarden Secrets Manager
+
+| Item | Name | Notes |
+| --- | --- | --- |
+| Project | `realtime-voice-wayfinder` | This project's secrets only |
+| Secret | `OPENAI_REALTIME_API_KEY` | The OpenAI key. The name must be exactly this. |
+| Machine account | `realtime-voice-wayfinder-mac` | Read-only access to that project only |
+| Access token | one per Mac, named after it (`tan-macbook-pro`) | Copy it now: step 3 asks for it. Revoke it when the Mac is retired. |
+
+### 3. Run the setup
 
 ```bash
 git clone https://github.com/lover40x/Voice-Wayfinder.git && cd Voice-Wayfinder
 ```
+
+```bash
+npm run setup
+```
+
+It checks the Mac, builds the bridge and the audio helper, asks you to paste the access token (into the macOS Keychain, never into a file), checks that Bitwarden hands over the OpenAI key, installs the plugin for your user, and adds the permission rule below to `~/.claude/settings.json` after asking (your old file is kept as `settings.json.bak-voice-wayfinder`):
+
+```json
+{ "permissions": { "allow": ["mcp__plugin_voice-wayfinder_voice"] } }
+```
+
+Without that rule, auto mode blocks the voice pane's buttons and typed answers, and every voice turn waits on a permission check. Run `npm run setup` again any time: it only does what is missing. `npm run setup:check` reports what is set up and changes nothing.
+
+### 4. Talk
+
+Start a **new** Claude Code session in the repo you plan in (the first time there, run `/setup-matt-pocock-skills` once), then type:
+
+```text
+/voice-wayfinder:voice-mode
+/wayfinder <your idea, or the map issue URL>
+```
+
+macOS asks for microphone access the first time: allow it. See [Use](#use) for what you see and how to answer.
+
+## Manual setup
+
+What `npm run setup` does, step by step, if you'd rather do it yourself.
+
+### Build
 
 ```bash
 npm install
@@ -43,16 +81,7 @@ npm install
 npm run build
 ```
 
-### 2. Secrets (Bitwarden Secrets Manager)
-
-In Bitwarden Secrets Manager create:
-
-| Item | Name | Notes |
-| --- | --- | --- |
-| Project | `realtime-voice-wayfinder` | This project's secrets only |
-| Secret | `OPENAI_REALTIME_API_KEY` | The dedicated OpenAI key |
-| Machine account | `realtime-voice-wayfinder-mac` | Read-only on that project only |
-| Access token | one per Mac, named after it (`tan-macbook-pro`) | Revoke it when the Mac is retired |
+### Secrets
 
 Put this Mac's access token in the Keychain (it prompts for the value, so it never lands in shell history):
 
@@ -68,7 +97,7 @@ BWS_ACCESS_TOKEN="$(security find-generic-password -s voice-wayfinder-bws -w)" b
 
 The bridge is started by `plugin/scripts/start-bridge.sh`, which runs it under `bws run`: the key exists only in the bridge process's memory, and the bridge removes it from its own environment so no child process inherits it. There is no `.env` file. If the machine account can read more than one project, set `VOICE_WAYFINDER_BWS_PROJECT_ID`.
 
-### 3. Install the plugin
+### Install the plugin
 
 From the clone's folder, in a terminal:
 
@@ -82,12 +111,19 @@ claude plugin install voice-wayfinder@voice-wayfinder-dev
 
 In the desktop app: + next to the prompt box → Plugins → Add marketplace with the clone's folder path → Add plugin. The plugin is read from this folder, so after editing it run `npm run build` and `/reload-plugins`. `/reload-plugins` reloads the skill and the pane but keeps the running bridge: for a bridge change, start a new session (or stop that session's `bridge.mjs` process; Claude Code starts the new build on the next voice call).
 
-### 4. Wayfinder in the target repo (Phase 1)
+### Allow the voice tools
 
-Install Matt Pocock's skills (`mattpocock-skills`, 1.3.1 or later, which includes `/wayfinder`) from the `mattpocock/skills` marketplace with `/plugin`. Then, in the repo you want to plan in:
+Add the rule to `permissions.allow` in `~/.claude/settings.json`, next to the rules already there:
 
-1. Run `/setup-matt-pocock-skills` so it writes the "Wayfinding operations" section and the `CLAUDE.md` pointer.
-2. Run a short text-only `/wayfinder` session and check that the map issue (label `wayfinder:map`) and its child tickets appear on GitHub.
+```json
+{ "permissions": { "allow": ["mcp__plugin_voice-wayfinder_voice"] } }
+```
+
+In auto mode, Claude Code's permission check refuses the pane's own calls to the bridge for anything but reading state (the buttons, typed answers), since no request of yours asked for them. The rule also spares every voice turn that check.
+
+### Wayfinder in the target repo
+
+In the repo you want to plan in, run `/setup-matt-pocock-skills` once so it writes the "Wayfinding operations" section and the `CLAUDE.md` pointer. A short text-only `/wayfinder` then shows whether the map issue (label `wayfinder:map`) and its child tickets land on GitHub.
 
 ## Use
 
@@ -96,14 +132,6 @@ In the target repo:
 1. `/voice-wayfinder:voice-mode` turns voice mode on (Claude checks the bridge and greets you).
 2. `/wayfinder <idea, or the map's URL>` runs Wayfinder; every question now comes by voice.
 3. Read along in the voice pane (it opens with voice mode; `/voice-pane` reopens it) or the captions above the prompt. Answer by speaking, or type in the chat box and press Enter: during a question, what you type goes straight in as your answer. The pane's buttons mute the mic, skip a question, or end the voice session. Missed a question? Say or type "ฟังไม่ทัน" or "อีกที" and it is asked again, a little slower. A soft tone means Claude is still thinking.
-
-### Permissions
-
-In auto mode, Claude Code's permission check refuses the pane's own calls to the bridge for anything but reading state (the buttons, typed answers), since no request of yours asked for them. Allow the plugin's voice tools in `~/.claude/settings.json`, which also spares every voice turn that check:
-
-```json
-{ "permissions": { "allow": ["mcp__plugin_voice-wayfinder_voice"] } }
-```
 
 Use headphones if echo cancellation reports it could not start (the pane shows the warning); otherwise the speakers work too.
 

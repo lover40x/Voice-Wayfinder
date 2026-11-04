@@ -128,7 +128,7 @@ test('a refusal from the permission check is explained in the pane', async ($, o
   }))
   await $.command.run(OPEN_PANE)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /permission check/ }))?.text).toContain('README: Permissions')
+  expect((await ui.find({ type: 'Text', text: /permission check/ }))?.text).toContain('npm run setup')
   await ui.unmount()
 })
 
