@@ -41010,6 +41010,17 @@ var VoiceSession = class {
    */
   stopped = false;
   gate;
+  /**
+   * Paused from the pane (someone came to talk to the person): the mic is off,
+   * nothing is spoken, a waiting question does not time out, and Claude's next
+   * voice call waits; Resume picks up where it was, the interrupted line again.
+   */
+  paused = false;
+  pausedAt = 0;
+  /** How long the last pause was, while Claude still owes the person a recap of where things stand. */
+  recapDue;
+  /** Voice calls in progress: a recap goes to one of them before the pane may take it. */
+  calls = 0;
   micModeTold = false;
   lines = [];
   nextLineId = 1;
@@ -41046,7 +41057,33 @@ var VoiceSession = class {
   // ---- tools ---------------------------------------------------------------
   /** `card` is what goes on screen while this is spoken; each call replaces the last. */
   async say(text2, signal, card, slower = false) {
-    if (this.stopped) return { status: "ended", spokenMs: 0, detail: STOPPED };
+    this.calls++;
+    try {
+      for (; ; ) {
+        await this.untilResumed(signal);
+        if (this.stopped) return { status: "ended", spokenMs: 0, detail: STOPPED };
+        if (signal?.aborted) return { status: "cancelled", spokenMs: 0 };
+        const pausedMs = this.takeRecap();
+        if (pausedMs !== void 0) return { status: "resumed", spokenMs: 0, pausedMs };
+        const said = await this.speakOnce(text2, signal, card, slower);
+        if (said.status !== "paused") return said;
+      }
+    } finally {
+      this.calls--;
+    }
+  }
+  takeRecap() {
+    const pausedMs = this.recapDue;
+    if (pausedMs === void 0) return void 0;
+    this.recapDue = void 0;
+    this.changed();
+    return pausedMs;
+  }
+  /** Waits while paused; returns at once otherwise, or when ended or cancelled. */
+  async untilResumed(signal) {
+    while (this.paused && !this.stopped && !signal?.aborted) await new Promise((r) => setTimeout(r, this.tickMs));
+  }
+  async speakOnce(text2, signal, card, slower) {
     await this.ensureConnected();
     const provider = this.provider;
     if (this.speech) this.stopSpeech("cancelled");
@@ -41094,7 +41131,8 @@ var VoiceSession = class {
   async listen(timeoutMs, signal) {
     if (this.stopped) return { status: "ended", text: "", parts: [] };
     await this.ensureConnected();
-    const reply = await this.collectReply(timeoutMs, signal);
+    this.calls++;
+    const reply = await this.collectReply(timeoutMs, signal).finally(() => this.calls--);
     if (reply.status === "replied") this.acknowledge();
     return reply;
   }
@@ -41105,7 +41143,8 @@ var VoiceSession = class {
     const { said, reply, repeats } = await this.ask(text2, screen2 ? { screen: screen2 } : void 0, timeoutMs, signal);
     if (!reply) {
       if (said.status === "skipped") this.skipRequested = false;
-      return { said, heardBefore, reply: { status: said.status === "failed" ? "disconnected" : said.status, text: "", parts: [] }, repeats };
+      const pausedMs = said.pausedMs !== void 0 ? { pausedMs: said.pausedMs } : {};
+      return { said, heardBefore, reply: { status: said.status === "failed" ? "disconnected" : said.status, text: "", parts: [], ...pausedMs }, repeats };
     }
     return { said, heardBefore, reply, repeats };
   }
@@ -41127,12 +41166,12 @@ var VoiceSession = class {
         continue;
       }
       if (!reply) {
-        const status = said.status === "failed" ? "disconnected" : said.status === "ended" ? "ended" : "cancelled";
-        answers.push({ question, status, answer: "", interrupted: false, repeats });
+        const status = said.status === "failed" ? "disconnected" : said.status === "ended" ? "ended" : said.status === "resumed" ? "resumed" : "cancelled";
+        answers.push({ question, status, answer: "", interrupted: false, repeats, ...said.pausedMs !== void 0 ? { pausedMs: said.pausedMs } : {} });
         return { heardBefore, answers, unasked: unasked() };
       }
-      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === "interrupted", repeats });
-      if (reply.status === "ended" || reply.status === "cancelled" || reply.status === "disconnected") {
+      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === "interrupted", repeats, ...reply.pausedMs !== void 0 ? { pausedMs: reply.pausedMs } : {} });
+      if (reply.status === "ended" || reply.status === "cancelled" || reply.status === "disconnected" || reply.status === "resumed") {
         return { heardBefore, answers, unasked: unasked() };
       }
     }
@@ -41158,12 +41197,42 @@ var VoiceSession = class {
         if (this.speech) this.stopSpeech("skipped");
         this.touch();
         return done("Question skipped.");
+      case "pause":
+        if (this.paused) return done("Already paused.", false);
+        this.paused = true;
+        this.pausedAt = this.now();
+        this.userSpeaking = false;
+        clearTimeout(this.cueTimer);
+        clearTimeout(this.bargeInTimer);
+        this.gate?.reset();
+        this.provider?.clearInput();
+        if (this.speech) this.stopSpeech("paused");
+        else if (this.clipSeq !== void 0) {
+          this.audio?.flush();
+          this.clipSeq = void 0;
+        }
+        this.touch();
+        return done("Paused: the mic is off and Claude waits until Resume.");
+      case "resume":
+        if (!this.paused) return done("Not paused.", false);
+        this.paused = false;
+        {
+          const pausedMs = this.now() - this.pausedAt;
+          const after = this.deps.recapAfterPauseMs ?? 0;
+          if (after > 0 && pausedMs >= after) this.recapDue = pausedMs;
+        }
+        this.touch();
+        return done("Resumed.");
       case "start":
+        this.recapDue = void 0;
+        this.paused = false;
         this.stopped = false;
         this.endRequested = false;
         this.touch();
         return done("Voice mode on. It connects on the first voice call.");
       case "end": {
+        this.recapDue = void 0;
+        this.paused = false;
         this.stopped = true;
         this.endRequested = true;
         this.queue = [];
@@ -41178,7 +41247,8 @@ var VoiceSession = class {
       }
       case "take": {
         const heard = this.takeHeard();
-        return heard.length ? { message: `Took ${heard.length} utterance(s) the person said while Claude worked.`, accepted: true, heard } : { message: "Nothing waiting.", accepted: false, heard };
+        const pausedMs = this.calls === 0 ? this.takeRecap() : void 0;
+        return heard.length || pausedMs !== void 0 ? { message: "Took what was waiting for Claude.", accepted: true, heard, ...pausedMs !== void 0 ? { pausedMs } : {} } : { message: "Nothing waiting.", accepted: false, heard };
       }
       case "type":
         return this.typed(text2) ? done("Typed reply delivered as the answer.") : done("No voice question is in progress, so the text was not taken as an answer.", false);
@@ -41225,6 +41295,7 @@ var VoiceSession = class {
       ...this.totals(),
       queuedUtterances: this.queue.length,
       ...this.stopped ? { stopped: true } : {},
+      ...this.recapDue !== void 0 ? { recapDueAfterMs: this.recapDue } : {},
       partial: [...this.partials.values()].join(" ").trim() || void 0,
       warning: this.warning,
       error: this.error,
@@ -41241,6 +41312,7 @@ var VoiceSession = class {
     } else if (s.lastSession) parts.push(`last voice session: ${describeCost(s.lastSession)}`);
     if (s.todayCostUsd !== void 0) parts.push(`OpenAI est. today ${usd(s.todayCostUsd)}, this month ${usd(s.monthCostUsd ?? 0)}`);
     if (s.queuedUtterances) parts.push(`${s.queuedUtterances} unheard utterance(s) waiting: call voice_listen`);
+    if (s.activity === "paused") parts.push("paused by the person: voice calls wait until they resume");
     if (s.muted) parts.push("mic muted");
     if (s.error) parts.push(`error: ${s.error}`);
     if (s.warning) parts.push(`warning: ${s.warning}`);
@@ -41440,7 +41512,7 @@ var VoiceSession = class {
     if (audio !== this.audio) return;
     switch (e.type) {
       case "mic": {
-        if (this.muted || !this.provider) return;
+        if (this.muted || this.paused || !this.provider) return;
         const pcm = this.gate ? this.gate.process(e.pcm) : e.pcm;
         if (pcm.length) this.provider.appendAudio(pcm);
         return;
@@ -41526,7 +41598,7 @@ var VoiceSession = class {
     this.cueTimer.unref?.();
   }
   playPcm(pcm, label) {
-    if (!this.audio || this.speech) return;
+    if (!this.audio || this.speech || this.paused) return;
     this.clipSeq = this.audio.play(pcm);
     this.deps.log?.timing({ what: "clip", text: label, afterReplyMs: this.lastReplyAt === void 0 ? -1 : this.now() - this.lastReplyAt });
   }
@@ -41580,7 +41652,7 @@ var VoiceSession = class {
     this.awaiting = true;
     this.changed();
     const parts = [];
-    const deadline = this.now() + timeoutMs;
+    let deadline = this.now() + timeoutMs;
     let lastHeardAt = this.now();
     let typed = false;
     const result = (status) => ({ status, text: parts.join(" "), parts, ...typed ? { typed } : {} });
@@ -41599,6 +41671,16 @@ var VoiceSession = class {
           typed ||= !!u.typed;
           lastHeardAt = this.now();
         }
+        if (this.paused && !typed) {
+          deadline += this.tickMs;
+          lastHeardAt = this.now();
+          await new Promise((r) => setTimeout(r, this.tickMs));
+          continue;
+        }
+        if (!parts.length && this.recapDue !== void 0) {
+          const pausedMs = this.takeRecap();
+          return { ...result("resumed"), pausedMs };
+        }
         const busy = this.userSpeaking || this.pending.size > 0;
         if (busy) lastHeardAt = this.now();
         const quietEnough = typed || this.now() - lastHeardAt >= this.deps.endOfReplyMs;
@@ -41615,6 +41697,7 @@ var VoiceSession = class {
     }
   }
   activity() {
+    if (this.paused && !this.stopped) return "paused";
     if (this.connecting) return "connecting";
     if (!this.provider) return this.error ? "error" : "off";
     if (this.speech) return "speaking";
@@ -41729,6 +41812,7 @@ var session = new VoiceSession({
   createAudio: () => new HelperAudioDevice(helperPath(pluginRoot), cfg.audio.echoCancellation, cfg.audio.autoGain ?? false),
   log: new TranscriptLog(cfg.logDir ?? defaultLogDir()),
   endOfReplyMs: cfg.conversation.endOfReplyMs,
+  recapAfterPauseMs: (cfg.conversation.recapAfterPauseSec ?? 60) * 1e3,
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
   noiseGate: cfg.audio.noiseGate?.enabled === false ? false : { ...cfg.audio.noiseGate },
   minUtteranceMs: cfg.conversation.minUtteranceMs,
@@ -41761,6 +41845,7 @@ async function guarded(extra, run, render) {
     clearInterval(beat);
   }
 }
+var minutesSaid = (ms = 0) => ms < 9e4 ? `${Math.round(ms / 1e3)} s` : `${Math.round(ms / 6e4)} min`;
 var describeSay = (r) => {
   switch (r.status) {
     case "completed":
@@ -41773,6 +41858,10 @@ var describeSay = (r) => {
       return "The person ended voice mode. Continue in text, and make no more voice calls until they start voice mode again (they will ask).";
     case "cancelled":
       return "Speech cancelled.";
+    case "paused":
+      return "Paused by the person.";
+    case "resumed":
+      return `The person paused voice for ${minutesSaid(r.pausedMs)} (someone came to talk to them) and just resumed. First give a short spoken recap with voice_say, one or two sentences: where you are and what you were about to say or ask. Then say it or ask it again.`;
     case "failed":
       return `Speech failed: ${r.detail ?? "unknown error"}. Say it again or continue in text.`;
   }
@@ -41789,6 +41878,8 @@ var describeReply = (r) => {
       return "The person ended voice mode. Continue in text, and make no more voice calls until they start voice mode again (they will ask).";
     case "cancelled":
       return "Listening was cancelled.";
+    case "resumed":
+      return `The person paused voice for ${minutesSaid(r.pausedMs)} (someone came to talk to them) and just resumed. First give a short spoken recap with voice_say, one or two sentences: where you are and what you were about to say or ask. Then say it or ask it again.`;
     case "disconnected":
       return `The voice connection dropped${r.text ? ` after hearing: ${r.text}` : ""}. The next voice call reconnects.`;
   }
@@ -41860,7 +41951,7 @@ server.registerTool(
       const lines = [];
       if (r.heardBefore.length) lines.push(`Before the round the person had also said: ${r.heardBefore.join(" ")}`);
       r.answers.forEach((a, i) => {
-        const heard = a.status === "replied" ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [] })})`;
+        const heard = a.status === "replied" ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [], pausedMs: a.pausedMs })})`;
         const notes = [a.interrupted && "they cut in while it was being asked", a.repeats && `asked to hear it again, repeated ${a.repeats}\xD7`].filter(Boolean);
         lines.push(`Q${i + 1}: ${a.question}
 A${i + 1}${notes.length ? ` (${notes.join("; ")})` : ""}: ${heard}`);
@@ -41893,9 +41984,9 @@ server.registerTool(
   "voice_control",
   {
     title: "Voice control",
-    description: 'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
+    description: 'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. "pause" and "resume" belong to the person (the Pause button in the voice pane): while paused, your voice calls wait. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
     inputSchema: {
-      action: external_exports.enum(["start", "mute", "unmute", "skip", "end", "type", "take"]),
+      action: external_exports.enum(["start", "pause", "resume", "mute", "unmute", "skip", "end", "type", "take"]),
       text: external_exports.string().max(4e3).optional().describe('With "type": what the person typed.')
     }
   },

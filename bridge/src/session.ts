@@ -28,6 +28,8 @@ export type SessionDeps = {
   bargeInConfirmMs?: number
   /** Utterances shorter than this are treated as noise and dropped. */
   minUtteranceMs?: number
+  /** A pause at least this long ends with a recap from Claude before it goes on (0: never). */
+  recapAfterPauseMs?: number
   /** Room noise is sent as silence (see gate.ts); false sends the mic as it is. */
   noiseGate?: NoiseGateOptions | false
   /** Played the instant a reply is complete, so the person hears they were heard. */
@@ -44,16 +46,17 @@ export type SessionDeps = {
 
 const STOPPED = 'The person ended voice mode (End). Continue in text and make no more voice calls until they start voice mode again.'
 
-export type SayStatus = 'completed' | 'interrupted' | 'cancelled' | 'failed' | 'skipped' | 'ended'
-export type SayResult = { status: SayStatus; spokenMs: number; detail?: string }
+export type SayStatus = 'completed' | 'interrupted' | 'cancelled' | 'failed' | 'skipped' | 'ended' | 'paused' | 'resumed'
+/** `pausedMs`: with `resumed`, how long the person had paused. */
+export type SayResult = { status: SayStatus; spokenMs: number; detail?: string; pausedMs?: number }
 
-export type ReplyStatus = 'replied' | 'timeout' | 'skipped' | 'ended' | 'cancelled' | 'disconnected'
-export type ReplyResult = { status: ReplyStatus; text: string; parts: string[]; typed?: boolean }
+export type ReplyStatus = 'replied' | 'timeout' | 'skipped' | 'ended' | 'cancelled' | 'disconnected' | 'resumed'
+export type ReplyResult = { status: ReplyStatus; text: string; parts: string[]; typed?: boolean; pausedMs?: number }
 
 /** `repeats`: how many times the person asked to hear the question again. */
 export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult; repeats: number }
 
-export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean; repeats: number }
+export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean; repeats: number; pausedMs?: number }
 export type InterviewResult = { heardBefore: string[]; answers: InterviewAnswer[]; unasked: string[]; ended?: string }
 
 type ActiveSpeech = {
@@ -115,6 +118,17 @@ export class VoiceSession {
    */
   private stopped = false
   private gate?: NoiseGate
+  /**
+   * Paused from the pane (someone came to talk to the person): the mic is off,
+   * nothing is spoken, a waiting question does not time out, and Claude's next
+   * voice call waits; Resume picks up where it was, the interrupted line again.
+   */
+  private paused = false
+  private pausedAt = 0
+  /** How long the last pause was, while Claude still owes the person a recap of where things stand. */
+  private recapDue?: number
+  /** Voice calls in progress: a recap goes to one of them before the pane may take it. */
+  private calls = 0
   private micModeTold = false
   private lines: TranscriptLine[] = []
   private nextLineId = 1
@@ -154,7 +168,38 @@ export class VoiceSession {
 
   /** `card` is what goes on screen while this is spoken; each call replaces the last. */
   async say(text: string, signal?: AbortSignal, card?: VoiceCard, slower = false): Promise<SayResult> {
-    if (this.stopped) return { status: 'ended', spokenMs: 0, detail: STOPPED }
+    this.calls++
+    try {
+      for (;;) {
+        await this.untilResumed(signal)
+        if (this.stopped) return { status: 'ended', spokenMs: 0, detail: STOPPED }
+        if (signal?.aborted) return { status: 'cancelled', spokenMs: 0 }
+        // Back from a long pause: Claude recaps before saying this.
+        const pausedMs = this.takeRecap()
+        if (pausedMs !== undefined) return { status: 'resumed', spokenMs: 0, pausedMs }
+        const said = await this.speakOnce(text, signal, card, slower)
+        // Paused mid-sentence: say it again from the start once resumed.
+        if (said.status !== 'paused') return said
+      }
+    } finally {
+      this.calls--
+    }
+  }
+
+  private takeRecap(): number | undefined {
+    const pausedMs = this.recapDue
+    if (pausedMs === undefined) return undefined
+    this.recapDue = undefined
+    this.changed()
+    return pausedMs
+  }
+
+  /** Waits while paused; returns at once otherwise, or when ended or cancelled. */
+  private async untilResumed(signal?: AbortSignal) {
+    while (this.paused && !this.stopped && !signal?.aborted) await new Promise(r => setTimeout(r, this.tickMs))
+  }
+
+  private async speakOnce(text: string, signal: AbortSignal | undefined, card: VoiceCard | undefined, slower: boolean): Promise<SayResult> {
     await this.ensureConnected()
     const provider = this.provider!
     if (this.speech) this.stopSpeech('cancelled')
@@ -203,7 +248,8 @@ export class VoiceSession {
   async listen(timeoutMs: number, signal?: AbortSignal): Promise<ReplyResult> {
     if (this.stopped) return { status: 'ended', text: '', parts: [] }
     await this.ensureConnected()
-    const reply = await this.collectReply(timeoutMs, signal)
+    this.calls++
+    const reply = await this.collectReply(timeoutMs, signal).finally(() => this.calls--)
     if (reply.status === 'replied') this.acknowledge()
     return reply
   }
@@ -215,7 +261,8 @@ export class VoiceSession {
     const { said, reply, repeats } = await this.ask(text, screen ? { screen } : undefined, timeoutMs, signal)
     if (!reply) {
       if (said.status === 'skipped') this.skipRequested = false
-      return { said, heardBefore, reply: { status: said.status === 'failed' ? 'disconnected' : (said.status as ReplyStatus), text: '', parts: [] }, repeats }
+      const pausedMs = said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}
+      return { said, heardBefore, reply: { status: said.status === 'failed' ? 'disconnected' : (said.status as ReplyStatus), text: '', parts: [], ...pausedMs }, repeats }
     }
     return { said, heardBefore, reply, repeats }
   }
@@ -238,19 +285,19 @@ export class VoiceSession {
         continue
       }
       if (!reply) {
-        const status: ReplyStatus = said.status === 'failed' ? 'disconnected' : said.status === 'ended' ? 'ended' : 'cancelled'
-        answers.push({ question, status, answer: '', interrupted: false, repeats })
+        const status: ReplyStatus = said.status === 'failed' ? 'disconnected' : said.status === 'ended' ? 'ended' : said.status === 'resumed' ? 'resumed' : 'cancelled'
+        answers.push({ question, status, answer: '', interrupted: false, repeats, ...(said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}) })
         return { heardBefore, answers, unasked: unasked() }
       }
-      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === 'interrupted', repeats })
-      if (reply.status === 'ended' || reply.status === 'cancelled' || reply.status === 'disconnected') {
+      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === 'interrupted', repeats, ...(reply.pausedMs !== undefined ? { pausedMs: reply.pausedMs } : {}) })
+      if (reply.status === 'ended' || reply.status === 'cancelled' || reply.status === 'disconnected' || reply.status === 'resumed') {
         return { heardBefore, answers, unasked: unasked() }
       }
     }
     return { heardBefore, answers, unasked: [] }
   }
 
-  control(action: VoiceControlAction, text = ''): { message: string; accepted: boolean; heard?: string[] } {
+  control(action: VoiceControlAction, text = ''): { message: string; accepted: boolean; heard?: string[]; pausedMs?: number } {
     const done = (message: string, accepted = true) => ({ message, accepted })
     switch (action) {
       case 'mute':
@@ -270,12 +317,42 @@ export class VoiceSession {
         if (this.speech) this.stopSpeech('skipped')
         this.touch()
         return done('Question skipped.')
+      case 'pause':
+        if (this.paused) return done('Already paused.', false)
+        this.paused = true
+        this.pausedAt = this.now()
+        this.userSpeaking = false
+        clearTimeout(this.cueTimer)
+        clearTimeout(this.bargeInTimer)
+        this.gate?.reset()
+        this.provider?.clearInput()
+        if (this.speech) this.stopSpeech('paused')
+        else if (this.clipSeq !== undefined) {
+          this.audio?.flush()
+          this.clipSeq = undefined
+        }
+        this.touch()
+        return done('Paused: the mic is off and Claude waits until Resume.')
+      case 'resume':
+        if (!this.paused) return done('Not paused.', false)
+        this.paused = false
+        {
+          const pausedMs = this.now() - this.pausedAt
+          const after = this.deps.recapAfterPauseMs ?? 0
+          if (after > 0 && pausedMs >= after) this.recapDue = pausedMs
+        }
+        this.touch()
+        return done('Resumed.')
       case 'start':
+        this.recapDue = undefined
+        this.paused = false
         this.stopped = false
         this.endRequested = false
         this.touch()
         return done('Voice mode on. It connects on the first voice call.')
       case 'end': {
+        this.recapDue = undefined
+        this.paused = false
         this.stopped = true
         this.endRequested = true
         this.queue = []
@@ -291,8 +368,10 @@ export class VoiceSession {
       }
       case 'take': {
         const heard = this.takeHeard()
-        return heard.length
-          ? { message: `Took ${heard.length} utterance(s) the person said while Claude worked.`, accepted: true, heard }
+        // A recap owed after a long pause goes to a waiting voice call if there is one.
+        const pausedMs = this.calls === 0 ? this.takeRecap() : undefined
+        return heard.length || pausedMs !== undefined
+          ? { message: 'Took what was waiting for Claude.', accepted: true, heard, ...(pausedMs !== undefined ? { pausedMs } : {}) }
           : { message: 'Nothing waiting.', accepted: false, heard }
       }
       case 'type':
@@ -345,6 +424,7 @@ export class VoiceSession {
       ...this.totals(),
       queuedUtterances: this.queue.length,
       ...(this.stopped ? { stopped: true as const } : {}),
+      ...(this.recapDue !== undefined ? { recapDueAfterMs: this.recapDue } : {}),
       partial: [...this.partials.values()].join(' ').trim() || undefined,
       warning: this.warning,
       error: this.error,
@@ -362,6 +442,7 @@ export class VoiceSession {
     } else if (s.lastSession) parts.push(`last voice session: ${describeCost(s.lastSession)}`)
     if (s.todayCostUsd !== undefined) parts.push(`OpenAI est. today ${usd(s.todayCostUsd)}, this month ${usd(s.monthCostUsd ?? 0)}`)
     if (s.queuedUtterances) parts.push(`${s.queuedUtterances} unheard utterance(s) waiting: call voice_listen`)
+    if (s.activity === 'paused') parts.push('paused by the person: voice calls wait until they resume')
     if (s.muted) parts.push('mic muted')
     if (s.error) parts.push(`error: ${s.error}`)
     if (s.warning) parts.push(`warning: ${s.warning}`)
@@ -575,7 +656,7 @@ export class VoiceSession {
     if (audio !== this.audio) return
     switch (e.type) {
       case 'mic': {
-        if (this.muted || !this.provider) return
+        if (this.muted || this.paused || !this.provider) return
         const pcm = this.gate ? this.gate.process(e.pcm) : e.pcm
         if (pcm.length) this.provider.appendAudio(pcm)
         return
@@ -669,7 +750,7 @@ export class VoiceSession {
   }
 
   private playPcm(pcm: Buffer, label: string) {
-    if (!this.audio || this.speech) return
+    if (!this.audio || this.speech || this.paused) return
     this.clipSeq = this.audio.play(pcm)
     this.deps.log?.timing({ what: 'clip', text: label, afterReplyMs: this.lastReplyAt === undefined ? -1 : this.now() - this.lastReplyAt })
   }
@@ -728,7 +809,7 @@ export class VoiceSession {
     this.awaiting = true
     this.changed()
     const parts: string[] = []
-    const deadline = this.now() + timeoutMs
+    let deadline = this.now() + timeoutMs
     let lastHeardAt = this.now()
     let typed = false
     const result = (status: ReplyStatus): ReplyResult => ({ status, text: parts.join(' '), parts, ...(typed ? { typed } : {}) })
@@ -746,6 +827,18 @@ export class VoiceSession {
           parts.push(u.text)
           typed ||= !!u.typed
           lastHeardAt = this.now()
+        }
+        // Paused: the clock stops; an answer typed meanwhile still counts.
+        if (this.paused && !typed) {
+          deadline += this.tickMs
+          lastHeardAt = this.now()
+          await new Promise(r => setTimeout(r, this.tickMs))
+          continue
+        }
+        // Back from a long pause with no answer yet: Claude recaps and asks again.
+        if (!parts.length && this.recapDue !== undefined) {
+          const pausedMs = this.takeRecap()!
+          return { ...result('resumed'), pausedMs }
         }
         const busy = this.userSpeaking || this.pending.size > 0
         if (busy) lastHeardAt = this.now()
@@ -765,6 +858,7 @@ export class VoiceSession {
   }
 
   private activity(): VoiceActivity {
+    if (this.paused && !this.stopped) return 'paused'
     if (this.connecting) return 'connecting'
     if (!this.provider) return this.error ? 'error' : 'off'
     if (this.speech) return 'speaking'

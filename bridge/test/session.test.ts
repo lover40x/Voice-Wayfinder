@@ -645,3 +645,105 @@ test('with the gate on, the mic reaches the provider delayed and room noise as s
   assert.ok(all.length > 0 && all.length < tone(2000, -50).length)
   assert.equal(peak(all.subarray(all.length / 2)), 0)
 })
+
+test('pause stops Claude mid-sentence and says it again from the start on resume', async () => {
+  const { provider, audio, session } = setup()
+  const said = session.say('มีอะไรจะถามอีกนิดค่ะ')
+  await tick()
+  provider.emit({ type: 'speech.audio', speechId: 's1', pcm: Buffer.alloc(4800) })
+  session.control('pause')
+  assert.equal((session.state() as VoiceStateV1).activity, 'paused')
+  const flushes = audio.flushes
+  assert.ok(flushes > 0)
+  await tick(50)
+  assert.equal(provider.said.length, 1)
+  session.control('resume')
+  await tick(30)
+  assert.equal(provider.said.length, 2)
+  speakThrough(provider, audio, 's2')
+  assert.equal((await said).status, 'completed')
+})
+
+test('while paused the mic is off, a question does not time out, and a new voice call waits', async () => {
+  const { provider, session } = setup()
+  let sent = 0
+  Object.assign(provider, { appendAudio: () => void sent++ })
+  const reply = session.listen(60)
+  await tick()
+  session.control('pause')
+  await tick(150)
+  // Past the 60 ms timeout, still waiting; mic audio is dropped.
+  ;(session as unknown as { onAudio: (a: unknown, e: unknown) => void }).onAudio((session as unknown as { audio: unknown }).audio, { type: 'mic', pcm: Buffer.alloc(480) })
+  assert.equal(sent, 0)
+  let waited = true
+  const next = session.say('ต่อนะคะ').then(r => ((waited = false), r))
+  await tick(50)
+  assert.equal(waited, true)
+  session.control('resume')
+  provider.utter('กลับมาแล้วครับ')
+  assert.equal((await reply).text, 'กลับมาแล้วครับ')
+  session.control('end')
+  assert.equal((await next).status, 'ended')
+})
+
+test('typing while paused still answers the waiting question', async () => {
+  const { session } = setup()
+  const reply = session.listen(5000)
+  await tick()
+  session.control('pause')
+  assert.equal(session.control('type', '2').accepted, true)
+  const r = await reply
+  assert.equal(r.text, '2')
+  assert.equal(r.typed, true)
+})
+
+test('back from a pause over a minute, a waiting question returns so Claude can recap first', async () => {
+  let skew = 0 // pauses are jumped over; real time still runs for the waits
+  const { provider, session } = setup({ recapAfterPauseMs: 60_000, now: () => Date.now() + skew })
+  const reply = session.listen(5000)
+  await tick()
+  session.control('pause')
+  skew += 3 * 60_000
+  session.control('resume')
+  assert.ok(Math.abs((session.state() as VoiceStateV1).recapDueAfterMs! - 180_000) < 1000)
+  const r = await reply
+  assert.equal(r.status, 'resumed')
+  assert.ok(Math.abs(r.pausedMs! - 180_000) < 1000)
+  assert.equal((session.state() as VoiceStateV1).recapDueAfterMs, undefined)
+  // Owed once: the next question goes ahead.
+  const next = session.listen(5000)
+  await tick()
+  provider.utter('ต่อเลย')
+  assert.equal((await next).text, 'ต่อเลย')
+})
+
+test('a short pause just carries on, and a waiting say returns for the recap instead of speaking', async () => {
+  let skew = 0 // pauses are jumped over; real time still runs for the waits
+  const { provider, session } = setup({ recapAfterPauseMs: 60_000, now: () => Date.now() + skew })
+  await session.listen(10)
+  session.control('pause')
+  skew += 20_000
+  session.control('resume')
+  assert.equal((session.state() as VoiceStateV1).recapDueAfterMs, undefined)
+  session.control('pause')
+  const said = session.say('ข้อต่อไปค่ะ')
+  await tick(20)
+  skew += 90_000
+  session.control('resume')
+  const r = await said
+  assert.equal(r.status, 'resumed')
+  assert.equal(provider.said.length, 0)
+})
+
+test('with no voice call waiting, the pane takes the recap request once', async () => {
+  let skew = 0 // pauses are jumped over; real time still runs for the waits
+  const { session } = setup({ recapAfterPauseMs: 60_000, now: () => Date.now() + skew })
+  await session.listen(10)
+  session.control('pause')
+  skew += 120_000
+  session.control('resume')
+  const t = session.control('take')
+  assert.equal(t.accepted, true)
+  assert.ok(Math.abs(t.pausedMs! - 120_000) < 1000)
+  assert.equal(session.control('take').accepted, false)
+})

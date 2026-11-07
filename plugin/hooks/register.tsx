@@ -49,6 +49,7 @@ const ACTIVITY: Record<VoiceActivity, { label: string; color: string; frames: st
   hearing: { label: 'Hearing you', color: YOU, frames: BARS },
   speaking: { label: 'Claude speaking', color: CLAUDE, frames: BARS },
   muted: { label: 'Mic muted', color: 'warning', frames: ['⊘'] },
+  paused: { label: 'Paused', color: 'warning', frames: ['⏸', '⏸', '⏸', ' '] },
   error: { label: 'Voice error', color: 'error', frames: ['✕'] },
 }
 
@@ -57,7 +58,7 @@ const glyph = (activity: VoiceActivity, n: number) => {
   return frames[n % frames.length]!
 }
 
-const LIVE = new Set<VoiceActivity>(['idle', 'listening', 'hearing', 'speaking', 'muted'])
+const LIVE = new Set<VoiceActivity>(['idle', 'listening', 'hearing', 'speaking', 'muted', 'paused'])
 
 const WHO: Record<TranscriptLine['who'], string> = { user: 'You', claude: 'Claude', system: '·' }
 
@@ -183,37 +184,66 @@ async function deliverTyped($: EngineInterface, text: string): Promise<boolean> 
  * Takes what the person said while no question waited; empty when nothing is
  * finished and waiting, or another take is in flight.
  */
-async function takeHeard($: EngineInterface): Promise<string[]> {
-  if (taking) return []
+type Waiting = { heard: string[]; pausedMs?: number }
+
+const NOTHING: Waiting = { heard: [] }
+
+async function takeHeard($: EngineInterface): Promise<Waiting> {
+  if (taking) return NOTHING
   taking = true
   try {
     const name = await connect($)
-    if (!name) return []
+    if (!name) return NOTHING
     const result = await $.mcp.call(name, 'voice_control', { action: 'take' })
-    const heard = (result.structuredContent as { heard?: unknown } | undefined)?.heard
-    if (result.isError || !Array.isArray(heard)) return []
-    const words = heard.filter((t): t is string => typeof t === 'string' && t.trim() !== '')
-    if (words.length) void poll($, true)
-    return words
+    const s = result.structuredContent as { heard?: unknown; pausedMs?: unknown } | undefined
+    if (result.isError || !s || !Array.isArray(s.heard)) return NOTHING
+    const heard = s.heard.filter((t): t is string => typeof t === 'string' && t.trim() !== '')
+    const pausedMs = typeof s.pausedMs === 'number' ? s.pausedMs : undefined
+    if (heard.length || pausedMs !== undefined) await poll($, true)
+    return pausedMs === undefined ? { heard } : { heard, pausedMs }
   } catch {
-    return []
+    return NOTHING
   } finally {
     taking = false
   }
 }
 
+const hasAny = (w: Waiting) => w.heard.length > 0 || w.pausedMs !== undefined
+
+function minutesSaid(ms: number): string {
+  return ms < 90_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`
+}
+
 /** Something the person said is finished and waiting, with no question to take it. */
 function hasWaiting(s: VoiceStateV1 | null): s is VoiceStateV1 {
-  return s !== null && LIVE.has(s.activity) && s.activity !== 'hearing' && !s.awaitingReply && !s.partial && s.queuedUtterances > 0
+  if (s === null || !LIVE.has(s.activity) || s.activity === 'paused') return false
+  if (s.recapDueAfterMs !== undefined) return true
+  return s.activity !== 'hearing' && !s.awaitingReply && !s.partial && s.queuedUtterances > 0
 }
 
 /** The words the model reads after a tool's result while it works. */
-function spokenNote(heard: string[]): string {
-  return (
-    `The person just said by voice, while you were working: "${heard.join(' ')}". ` +
-    'Answer them now by voice (voice_say, or voice_converse when you need their reply) before you carry on, ' +
-    'and take it into account: it may change what you are doing.'
-  )
+function spokenNote(w: Waiting): string {
+  const notes: string[] = []
+  if (w.pausedMs !== undefined) {
+    notes.push(
+      `The person paused voice for ${minutesSaid(w.pausedMs)} (someone came to talk to them) and just resumed. ` +
+        'Give them a short spoken recap now with voice_say, one or two sentences: where things stand and what you are doing.',
+    )
+  }
+  if (w.heard.length) {
+    notes.push(
+      `The person just said by voice, while you were working: "${w.heard.join(' ')}". ` +
+        'Answer them now by voice (voice_say, or voice_converse when you need their reply) before you carry on, ' +
+        'and take it into account: it may change what you are doing.',
+    )
+  }
+  return notes.join(' ')
+}
+
+/** What starts a turn when Claude is idle: the person's words, as theirs. */
+function idlePrompt(w: Waiting): string {
+  const recap = w.pausedMs !== undefined ? `(กลับมาแล้ว หลัง pause ไป ${minutesSaid(w.pausedMs)}) ช่วยสรุปสั้นๆ ว่าเราถึงไหนแล้ว` : ''
+  return `🎙 ${[recap, w.heard.join(' ')].filter(Boolean).join(' ')}`
 }
 
 /** With Claude idle, what the person said starts a turn, as their own words. */
@@ -222,10 +252,10 @@ async function deliverIdle($: EngineInterface) {
   const s = await read($, voice)
   if (!hasWaiting(s)) return
   const last = s.transcript.findLast(line => line.who === 'user')
-  if (last && Date.now() - last.at < QUIET_MS) return
-  const heard = await takeHeard($)
-  if (!heard.length) return
-  void $.prompt.submit({ text: `🎙 ${heard.join(' ')}`, asUser: true })
+  if (s.recapDueAfterMs === undefined && last && Date.now() - last.at < QUIET_MS) return
+  const waiting = await takeHeard($)
+  if (!hasAny(waiting)) return
+  void $.prompt.submit({ text: idlePrompt(waiting), asUser: true })
 }
 
 function openPane($: EngineInterface) {
@@ -255,9 +285,9 @@ export const register: Register = on => {
     const r = await next(e)
     if (e.agentId !== undefined || r.deny !== undefined || OWN_TOOLS.test(e.tool)) return r
     if (!hasWaiting(await read($, voice))) return r
-    const heard = await takeHeard($)
-    if (!heard.length) return r
-    return { ...r, context: [...(r.context ?? []), spokenNote(heard)] }
+    const waiting = await takeHeard($)
+    if (!hasAny(waiting)) return r
+    return { ...r, context: [...(r.context ?? []), spokenNote(waiting)] }
   })
 
   on('turn.start', ($, e, next) => {
@@ -338,7 +368,11 @@ export const register: Register = on => {
         ) : (
           ''
         )}
-        {inQuestion && <Text dimColor>Speak, or type here and press Enter (a choice number works).</Text>}
+        {s.activity === 'paused' ? (
+          <Text dimColor>Paused: Claude waits and the mic is off. Press ▶ Resume in the voice pane (/voice-pane).</Text>
+        ) : (
+          inQuestion && <Text dimColor>Speak, or type here and press Enter (a choice number works).</Text>
+        )}
       </Box>
     )
   })
@@ -424,12 +458,19 @@ export const register: Register = on => {
             ) : (
               ''
             )}
-            {inQuestion && <Text dimColor>Speak, or type in the chat box (a choice number works).</Text>}
+            {s.activity === 'paused' ? (
+              <Text dimColor>Paused: the mic is off and Claude waits. Resume picks up where it stopped.</Text>
+            ) : (
+              inQuestion && <Text dimColor>Speak, or type in the chat box (a choice number works).</Text>
+            )}
           </Box>
         )}
 
         {live && (
           <Box key="controls" flexDirection="row" gap={1}>
+            <Button key="pause" onPress={() => void control($, s.activity === 'paused' ? 'resume' : 'pause')}>
+              {s.activity === 'paused' ? '▶ Resume' : '⏸ Pause'}
+            </Button>
             <Button key="mute" onPress={() => void control($, s.muted ? 'unmute' : 'mute')}>
               {s.muted ? '🎙 Unmute' : '🔇 Mute'}
             </Button>

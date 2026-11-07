@@ -48,6 +48,7 @@ const session = new VoiceSession({
   createAudio: () => new HelperAudioDevice(helperPath(pluginRoot), cfg.audio.echoCancellation, cfg.audio.autoGain ?? false),
   log: new TranscriptLog(cfg.logDir ?? defaultLogDir()),
   endOfReplyMs: cfg.conversation.endOfReplyMs,
+  recapAfterPauseMs: (cfg.conversation.recapAfterPauseSec ?? 60) * 1000,
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
   noiseGate: cfg.audio.noiseGate?.enabled === false ? false : { ...cfg.audio.noiseGate },
   minUtteranceMs: cfg.conversation.minUtteranceMs,
@@ -94,6 +95,8 @@ async function guarded<T>(extra: Extra, run: () => Promise<T>, render: (r: T) =>
   }
 }
 
+const minutesSaid = (ms = 0) => (ms < 90_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`)
+
 const describeSay = (r: SayResult) => {
   switch (r.status) {
     case 'completed':
@@ -106,6 +109,10 @@ const describeSay = (r: SayResult) => {
       return 'The person ended voice mode. Continue in text, and make no more voice calls until they start voice mode again (they will ask).'
     case 'cancelled':
       return 'Speech cancelled.'
+    case 'paused':
+      return 'Paused by the person.'
+    case 'resumed':
+      return `The person paused voice for ${minutesSaid(r.pausedMs)} (someone came to talk to them) and just resumed. First give a short spoken recap with voice_say, one or two sentences: where you are and what you were about to say or ask. Then say it or ask it again.`
     case 'failed':
       return `Speech failed: ${r.detail ?? 'unknown error'}. Say it again or continue in text.`
   }
@@ -125,6 +132,8 @@ const describeReply = (r: ReplyResult) => {
       return 'The person ended voice mode. Continue in text, and make no more voice calls until they start voice mode again (they will ask).'
     case 'cancelled':
       return 'Listening was cancelled.'
+    case 'resumed':
+      return `The person paused voice for ${minutesSaid(r.pausedMs)} (someone came to talk to them) and just resumed. First give a short spoken recap with voice_say, one or two sentences: where you are and what you were about to say or ask. Then say it or ask it again.`
     case 'disconnected':
       return `The voice connection dropped${r.text ? ` after hearing: ${r.text}` : ''}. The next voice call reconnects.`
   }
@@ -217,7 +226,7 @@ server.registerTool(
         const lines = []
         if (r.heardBefore.length) lines.push(`Before the round the person had also said: ${r.heardBefore.join(' ')}`)
         r.answers.forEach((a, i) => {
-          const heard = a.status === 'replied' ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [] })})`
+          const heard = a.status === 'replied' ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [], pausedMs: a.pausedMs })})`
           const notes = [a.interrupted && 'they cut in while it was being asked', a.repeats && `asked to hear it again, repeated ${a.repeats}×`].filter(Boolean)
           lines.push(`Q${i + 1}: ${a.question}\nA${i + 1}${notes.length ? ` (${notes.join('; ')})` : ''}: ${heard}`)
         })
@@ -252,9 +261,9 @@ server.registerTool(
   {
     title: 'Voice control',
     description:
-      'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
+      'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. "pause" and "resume" belong to the person (the Pause button in the voice pane): while paused, your voice calls wait. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
     inputSchema: {
-      action: z.enum(['start', 'mute', 'unmute', 'skip', 'end', 'type', 'take']),
+      action: z.enum(['start', 'pause', 'resume', 'mute', 'unmute', 'skip', 'end', 'type', 'take']),
       text: z.string().max(4000).optional().describe('With "type": what the person typed.'),
     },
   },

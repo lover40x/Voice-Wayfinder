@@ -64,6 +64,8 @@ After each decision, confirm it in one spoken sentence with `voice_converse` ("�
 | `replied` | Use the answer. |
 | `timeout` | Ask again once, shorter. Then `voice_listen`. If still nothing, continue in text. |
 | `skipped` | The person pressed Skip in the voice pane: leave this question open (note it in the ticket or the fog) and move on. |
+| (a long wait) | The person may have pressed Pause (someone came to talk to them): your voice call just waits and returns normally after Resume. Don't switch to text or ask again because a call took long. |
+| `resumed` | The person paused for over a minute and just came back. Give a spoken recap first with `voice_say`, one or two sentences: where things stand and what you were about to ask. Then ask or say it again. The same request can also arrive beside a tool result, or as a 🎙 message ("ช่วยสรุปสั้นๆ ว่าเราถึงไหนแล้ว"): answer it the same way. |
 | `ended` | The person ended voice mode (End): continue in text and make no more `voice_*` calls, not even a closing `voice_say`, until they start voice mode again. |
 | `disconnected` | Call the same tool once more (it reconnects). If it fails again, continue in text. |
 

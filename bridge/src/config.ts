@@ -34,6 +34,8 @@ export type BridgeConfig = {
     replyTimeoutSec: number
     bargeInConfirmMs: number
     minUtteranceMs: number
+    /** After a pause at least this long, Claude recaps where things stand (0: never). */
+    recapAfterPauseSec?: number
     /** Short clips played the moment a reply is complete; [] turns them off. */
     acknowledgements: string[]
     /**

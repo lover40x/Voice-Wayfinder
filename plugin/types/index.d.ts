@@ -11,6 +11,7 @@ export type VoiceActivity =
   | 'hearing' // the person is speaking right now
   | 'speaking' // Claude's text is being spoken
   | 'muted'
+  | 'paused' // the person paused: mic off, Claude waits until Resume
   | 'error'
 
 /** What Claude put on screen for the question in progress: its full text and choices. */
@@ -64,6 +65,8 @@ export type VoiceStateV1 = {
   queuedUtterances: number
   /** Voice mode was ended (End): nothing speaks, listens or reconnects until it is started again. */
   stopped?: true
+  /** Resumed after a long pause; Claude owes a short recap (ms the pause lasted), until it is delivered. */
+  recapDueAfterMs?: number
   /** The words being heard right now, before the utterance is finished. */
   partial?: string
   warning?: string
@@ -78,9 +81,10 @@ export type VoiceStateUnchanged = { v: 1; rev: number; unchanged: true }
 /**
  * `type` delivers text the person typed as their answer (with `text`); `take`
  * hands over what they said while no question waited, answered with `heard`;
- * `start` turns voice mode back on after `end`.
+ * `start` turns voice mode back on after `end`; `pause` holds everything (mic, speech,
+ * timeouts, Claude's next voice call) until `resume`.
  */
-export type VoiceControlAction = 'start' | 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take'
+export type VoiceControlAction = 'start' | 'pause' | 'resume' | 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take'
 
 /** Whether the pane can reach the bridge's MCP server. */
 export type BridgeLink = {

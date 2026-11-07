@@ -34,6 +34,7 @@
     "replyTimeoutSec": 180,
     "bargeInConfirmMs": 500,
     "minUtteranceMs": 300,
+    "recapAfterPauseSec": 60,
     "acknowledgements": ["ค่ะ", "รับทราบค่ะ", "โอเคค่ะ"],
     "thinkingCue": "tone",
     "thinkingCueAfterMs": 3000,

@@ -87,8 +87,10 @@ function bridge(on: On, state: VoiceStateV1, calls: Call[], acceptsTyped = true,
 /** The bridge hands over what is queued once, as the real one does. */
 function take(state: VoiceStateV1) {
   const heard = state.queuedUtterances ? state.transcript.filter(l => l.who === 'user').slice(-state.queuedUtterances).map(l => l.text) : []
+  const pausedMs = state.recapDueAfterMs
   state.queuedUtterances = 0
-  return { message: 'took', accepted: heard.length > 0, heard }
+  delete state.recapDueAfterMs
+  return { message: 'took', accepted: heard.length > 0 || pausedMs !== undefined, heard, ...(pausedMs !== undefined ? { pausedMs } : {}) }
 }
 
 const typedPrompt = (text: string) => ({ text, wait: false, origin: { kind: 'sdk' } }) as const
@@ -112,10 +114,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     bridge(on, STATE, calls)
     await $.command.run(OPEN_PANE)
     const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'pause' })
     await ui.press({ key: 'mute' })
     await ui.press({ key: 'skip' })
     await ui.press({ key: 'end' })
-    expect(calls.filter(c => c.tool === 'voice_control').map(c => c.args.action)).toEqual(['mute', 'skip', 'end'])
+    expect(calls.filter(c => c.tool === 'voice_control').map(c => c.args.action)).toEqual(['pause', 'mute', 'skip', 'end'])
     await ui.unmount()
   })
 
@@ -141,11 +144,11 @@ test('the conversation lists the newest line first', async ($, on) => {
   await ui.unmount()
 })
 
-test('the controls are three short buttons', async ($, on) => {
+test('the controls are four short buttons', async ($, on) => {
   bridge(on, STATE, [])
   await $.command.run(OPEN_PANE)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  for (const [key, label] of [['mute', '🔇 Mute'], ['skip', '⏭ Skip'], ['end', '⏹ End']]) {
+  for (const [key, label] of [['pause', '⏸ Pause'], ['mute', '🔇 Mute'], ['skip', '⏭ Skip'], ['end', '⏹ End']]) {
     expect((await ui.find({ key }))?.text).toBe(label)
   }
   await ui.unmount()
@@ -318,4 +321,39 @@ test('what the person says while Claude is idle starts a turn in their own words
   await $.command.run(OPEN_PANE)
   await clock.settle()
   expect(prompts).toEqual(['🎙 ใน system context ไม่ได้บอกไว้เหรอ'])
+})
+
+test('while paused the pane offers Resume and says Claude waits', async ($, on) => {
+  const calls: Call[] = []
+  bridge(on, { ...STATE, activity: 'paused' }, calls)
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'pause' }))?.text).toBe('▶ Resume')
+  expect(await ui.find({ type: 'Text', text: /Paused: the mic is off/ })).toBeDefined()
+  await ui.press({ key: 'pause' })
+  expect(calls.filter(c => c.tool === 'voice_control').map(c => c.args.action)).toEqual(['resume'])
+  await ui.unmount()
+})
+
+/** Back from a three-minute pause, nothing said meanwhile. */
+const RESUMED = (): VoiceStateV1 => ({ ...WORKING(), queuedUtterances: 0, recapDueAfterMs: 180_000 })
+
+test('back from a long pause while Claude works, its next tool result asks for a spoken recap', async ($, on) => {
+  const prompts: string[] = []
+  bridge(on, RESUMED(), [], true, [], prompts)
+  await $.turn.start({ text: 'build it', turnId: 't1' })
+  await $.command.run(OPEN_PANE)
+  const r = await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  expect(r.context?.join('\n')).toContain('paused voice for 3 min')
+  expect(r.context?.join('\n')).toContain('recap')
+  expect(prompts).toEqual([])
+})
+
+test('back from a long pause with Claude idle, a turn starts asking where things stand', async ($, on) => {
+  const prompts: string[] = []
+  const clock = mock.clock(on)
+  bridge(on, RESUMED(), [], true, [], prompts)
+  await $.command.run(OPEN_PANE)
+  await clock.settle()
+  expect(prompts).toEqual(['🎙 (กลับมาแล้ว หลัง pause ไป 3 min) ช่วยสรุปสั้นๆ ว่าเราถึงไหนแล้ว'])
 })
