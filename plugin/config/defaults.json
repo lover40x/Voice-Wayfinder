@@ -25,12 +25,14 @@
     }
   },
   "audio": {
-    "echoCancellation": true
+    "echoCancellation": true,
+    "autoGain": false,
+    "noiseGate": { "enabled": true, "openDb": 12, "minDb": -55, "holdMs": 350, "lookaheadMs": 120 }
   },
   "conversation": {
     "endOfReplyMs": 900,
     "replyTimeoutSec": 180,
-    "bargeInConfirmMs": 250,
+    "bargeInConfirmMs": 500,
     "minUtteranceMs": 300,
     "acknowledgements": ["ค่ะ", "รับทราบค่ะ", "โอเคค่ะ"],
     "thinkingCue": "tone",

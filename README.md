@@ -133,7 +133,7 @@ In the target repo:
 2. `/wayfinder <idea, or the map's URL>` runs Wayfinder; every question now comes by voice.
 3. Read along in the voice pane (it opens with voice mode; `/voice-pane` reopens it) or the captions above the prompt. Answer by speaking, or type in the chat box and press Enter: during a question, what you type goes straight in as your answer. The pane's buttons mute the mic, skip a question, or end the voice session. Missed a question? Say or type "ฟังไม่ทัน" or "อีกที" and it is asked again, a little slower. A soft tone means Claude is still thinking. You can also speak while Claude is working (writing code, running a build): it hears you at its next step and answers by voice, and once it has finished, what you say starts its next turn. Mute the mic when you talk to someone else in the room.
 
-Use headphones if echo cancellation reports it could not start (the pane shows the warning); otherwise the speakers work too.
+Use headphones if echo cancellation reports it could not start (the pane shows the warning); otherwise the speakers work too. For a noisy room, turn on macOS Voice Isolation while voice is on (Control Center → Mic Mode → Voice Isolation); the bridge also gates out steady room noise on its own. End in the pane stops voice for good: Claude carries on in text until you run `/voice-wayfinder:voice-mode` again.
 
 ## Configuration
 
@@ -142,7 +142,7 @@ Defaults are in `plugin/config/defaults.json`. Put your own overrides in `~/.con
 ```json
 {
   "openai": { "model": "gpt-realtime-2.1-mini", "voice": "cedar", "turnDetection": { "type": "semantic_vad", "eagerness": "low" } },
-  "audio": { "echoCancellation": false },
+  "audio": { "echoCancellation": false, "noiseGate": { "enabled": true, "openDb": 15 } },
   "conversation": { "endOfReplyMs": 2000 },
   "vocabulary": ["Supabase", "RLS", "Edge Function"]
 }

@@ -22,7 +22,13 @@ export type OpenAIConfig = {
 export type BridgeConfig = {
   provider: 'openai-realtime'
   openai: OpenAIConfig
-  audio: { echoCancellation: boolean }
+  audio: {
+    echoCancellation: boolean
+    /** Voice processing's automatic gain; off so a quiet room is not turned up. */
+    autoGain?: boolean
+    /** Room noise sent as silence before voice detection (bridge/src/gate.ts). */
+    noiseGate?: { enabled: boolean; openDb?: number; minDb?: number; holdMs?: number; lookaheadMs?: number }
+  }
   conversation: {
     endOfReplyMs: number
     replyTimeoutSec: number

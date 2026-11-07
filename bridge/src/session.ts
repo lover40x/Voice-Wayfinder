@@ -1,3 +1,4 @@
+import { isNoiseTranscript, NoiseGate, type NoiseGateOptions } from './gate.ts'
 import { randomUUID } from 'node:crypto'
 
 import {
@@ -27,6 +28,8 @@ export type SessionDeps = {
   bargeInConfirmMs?: number
   /** Utterances shorter than this are treated as noise and dropped. */
   minUtteranceMs?: number
+  /** Room noise is sent as silence (see gate.ts); false sends the mic as it is. */
+  noiseGate?: NoiseGateOptions | false
   /** Played the instant a reply is complete, so the person hears they were heard. */
   acknowledgements?: readonly string[]
   /**
@@ -39,6 +42,8 @@ export type SessionDeps = {
   tickMs?: number
 }
 
+const STOPPED = 'The person ended voice mode (End). Continue in text and make no more voice calls until they start voice mode again.'
+
 export type SayStatus = 'completed' | 'interrupted' | 'cancelled' | 'failed' | 'skipped' | 'ended'
 export type SayResult = { status: SayStatus; spokenMs: number; detail?: string }
 
@@ -49,7 +54,7 @@ export type ReplyResult = { status: ReplyStatus; text: string; parts: string[]; 
 export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult; repeats: number }
 
 export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean; repeats: number }
-export type InterviewResult = { heardBefore: string[]; answers: InterviewAnswer[]; unasked: string[] }
+export type InterviewResult = { heardBefore: string[]; answers: InterviewAnswer[]; unasked: string[]; ended?: string }
 
 type ActiveSpeech = {
   id: string
@@ -104,6 +109,13 @@ export class VoiceSession {
   private muted = false
   private skipRequested = false
   private endRequested = false
+  /**
+   * The person (or Claude, at the end) ended voice mode: no voice call speaks or
+   * listens again, and nothing reconnects, until voice mode is started again.
+   */
+  private stopped = false
+  private gate?: NoiseGate
+  private micModeTold = false
   private lines: TranscriptLine[] = []
   private nextLineId = 1
   private card?: VoiceCard
@@ -134,6 +146,7 @@ export class VoiceSession {
   constructor(deps: SessionDeps) {
     this.deps = deps
     this.now = deps.now ?? Date.now
+    if (deps.noiseGate !== false && deps.noiseGate !== undefined) this.gate = new NoiseGate(deps.noiseGate)
     this.tickMs = deps.tickMs ?? 50
   }
 
@@ -141,6 +154,7 @@ export class VoiceSession {
 
   /** `card` is what goes on screen while this is spoken; each call replaces the last. */
   async say(text: string, signal?: AbortSignal, card?: VoiceCard, slower = false): Promise<SayResult> {
+    if (this.stopped) return { status: 'ended', spokenMs: 0, detail: STOPPED }
     await this.ensureConnected()
     const provider = this.provider!
     if (this.speech) this.stopSpeech('cancelled')
@@ -187,6 +201,7 @@ export class VoiceSession {
   }
 
   async listen(timeoutMs: number, signal?: AbortSignal): Promise<ReplyResult> {
+    if (this.stopped) return { status: 'ended', text: '', parts: [] }
     await this.ensureConnected()
     const reply = await this.collectReply(timeoutMs, signal)
     if (reply.status === 'replied') this.acknowledge()
@@ -194,6 +209,7 @@ export class VoiceSession {
   }
 
   async converse(text: string, timeoutMs: number, signal?: AbortSignal, screen?: string): Promise<ConverseResult> {
+    if (this.stopped) return { said: { status: 'ended', spokenMs: 0, detail: STOPPED }, heardBefore: [], reply: { status: 'ended', text: '', parts: [] }, repeats: 0 }
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
     const { said, reply, repeats } = await this.ask(text, screen ? { screen } : undefined, timeoutMs, signal)
@@ -209,6 +225,7 @@ export class VoiceSession {
    * at once, so Claude thinks only once per round instead of once per question.
    */
   async interview(questions: readonly string[], timeoutMs: number, signal?: AbortSignal, screen?: string): Promise<InterviewResult> {
+    if (this.stopped) return { heardBefore: [], answers: [], unasked: [...questions], ended: STOPPED }
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
     const answers: InterviewAnswer[] = []
@@ -239,6 +256,7 @@ export class VoiceSession {
       case 'mute':
         this.muted = true
         this.userSpeaking = false
+        this.gate?.reset()
         this.provider?.clearInput()
         this.touch()
         return done('Microphone muted.')
@@ -252,8 +270,15 @@ export class VoiceSession {
         if (this.speech) this.stopSpeech('skipped')
         this.touch()
         return done('Question skipped.')
+      case 'start':
+        this.stopped = false
+        this.endRequested = false
+        this.touch()
+        return done('Voice mode on. It connects on the first voice call.')
       case 'end': {
+        this.stopped = true
         this.endRequested = true
+        this.queue = []
         if (this.speech) this.stopSpeech('ended')
         const wasOn = !!this.provider
         this.disconnect('Voice session ended.')
@@ -319,6 +344,7 @@ export class VoiceSession {
       lastSession: this.lastSession,
       ...this.totals(),
       queuedUtterances: this.queue.length,
+      ...(this.stopped ? { stopped: true as const } : {}),
       partial: [...this.partials.values()].join(' ').trim() || undefined,
       warning: this.warning,
       error: this.error,
@@ -367,6 +393,7 @@ export class VoiceSession {
   }
 
   private async connect() {
+    this.gate?.reset()
     this.endRequested = false
     this.skipRequested = false
     this.error = undefined
@@ -510,9 +537,11 @@ export class VoiceSession {
         this.heard.delete(e.itemId)
         const durationMs = heard?.durationMs
         const tooShort = durationMs !== undefined && durationMs < (this.deps.minUtteranceMs ?? 0)
-        if (heard) this.deps.log?.timing({ what: 'heard', speechMs: durationMs ?? -1, transcribeMs: this.now() - heard.stoppedAt, dropped: tooShort ? 'yes' : 'no' })
         const text = e.text.trim()
-        if (text && !tooShort) {
+        // A cough, a sigh, or what recognition invents from noise: not an answer.
+        const noise = !tooShort && isNoiseTranscript(text)
+        if (heard) this.deps.log?.timing({ what: 'heard', speechMs: durationMs ?? -1, transcribeMs: this.now() - heard.stoppedAt, dropped: tooShort ? 'short' : noise ? 'noise' : 'no' })
+        if (text && !tooShort && !noise) {
           this.queue.push({ text, at: this.now() })
           this.addLine('user', text)
         }
@@ -545,9 +574,12 @@ export class VoiceSession {
   private onAudio(audio: AudioDevice, e: AudioEvent) {
     if (audio !== this.audio) return
     switch (e.type) {
-      case 'mic':
-        if (!this.muted) this.provider?.appendAudio(e.pcm)
+      case 'mic': {
+        if (this.muted || !this.provider) return
+        const pcm = this.gate ? this.gate.process(e.pcm) : e.pcm
+        if (pcm.length) this.provider.appendAudio(pcm)
         return
+      }
       case 'played': {
         if (this.clipSeq !== undefined && e.seq >= this.clipSeq) this.clipSeq = undefined
         const speech = this.speech
@@ -567,6 +599,13 @@ export class VoiceSession {
         this.restartAudio()
         return
       case 'ready':
+        // macOS's own noise removal for calls: suggest it once when it is off.
+        if (e.micMode && e.micMode !== 'voiceIsolation' && !this.micModeTold) {
+          this.micModeTold = true
+          this.warning =
+            'For less room noise, turn on Voice Isolation while voice is on: Control Center → Mic Mode → Voice Isolation.'
+          this.changed()
+        }
         return
     }
   }

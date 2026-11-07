@@ -11,7 +11,7 @@ The person follows in the voice pane and the captions above the prompt: the ques
 
 ## Start
 
-1. Call `voice_status`. If it reports an error (no key, no microphone), tell the person in text what it says and stop voice mode.
+1. Call `voice_control` with `start` (voice stays off after an End until this), then `voice_status`. If it reports an error (no key, no microphone), tell the person in text what it says and stop voice mode.
 2. Greet in one short Thai sentence with `voice_say`, then carry on with the task. With `/wayfinder`, its rules all still hold: one resolved ticket per session (research excepted), research as a subagent, HITL tickets resolved only by the person's own answers.
 
 ## Asking
@@ -64,7 +64,7 @@ After each decision, confirm it in one spoken sentence with `voice_converse` ("à
 | `replied` | Use the answer. |
 | `timeout` | Ask again once, shorter. Then `voice_listen`. If still nothing, continue in text. |
 | `skipped` | The person pressed Skip in the voice pane: leave this question open (note it in the ticket or the fog) and move on. |
-| `ended` | The person ended voice mode: continue in text, no more `voice_*` calls unless asked. |
+| `ended` | The person ended voice mode (End): continue in text and make no more `voice_*` calls, not even a closing `voice_say`, until they start voice mode again. |
 | `disconnected` | Call the same tool once more (it reconnects). If it fails again, continue in text. |
 
 ## Ending

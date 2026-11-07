@@ -3,7 +3,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 export type AudioEvent =
   | { type: 'mic'; pcm: Buffer }
   | { type: 'played'; seq: number }
-  | { type: 'ready'; voiceProcessing: boolean }
+  /** `micMode`: the macOS microphone mode in effect (`standard`, `wideSpectrum`, `voiceIsolation`), when known. */
+  | { type: 'ready'; voiceProcessing: boolean; micMode?: string }
   | { type: 'warning'; message: string }
   | { type: 'exit'; code: number | null; message?: string }
 
@@ -28,10 +29,13 @@ export class HelperAudioDevice implements AudioDevice {
   private lastError?: string
   private readonly binary: string
   private echoCancellation: boolean
+  private readonly autoGain: boolean
 
-  constructor(binary: string, echoCancellation: boolean) {
+  /** `autoGain` false keeps voice processing from turning up a quiet room. */
+  constructor(binary: string, echoCancellation: boolean, autoGain = false) {
     this.binary = binary
     this.echoCancellation = echoCancellation
+    this.autoGain = autoGain
   }
 
   onEvent(handler: (e: AudioEvent) => void) {
@@ -52,7 +56,7 @@ export class HelperAudioDevice implements AudioDevice {
 
   private launch(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.binary, this.echoCancellation ? ['--voice-processing'] : [], { stdio: ['pipe', 'pipe', 'pipe'] })
+      const child = spawn(this.binary, [...(this.echoCancellation ? ['--voice-processing'] : []), ...(this.autoGain ? [] : ['--no-agc'])], { stdio: ['pipe', 'pipe', 'pipe'] })
       this.child = child
       let ready = false
       child.on('error', err => reject(new Error(`audio helper failed to start (${this.binary}): ${err.message}. Run npm run build:audio.`)))
@@ -68,10 +72,10 @@ export class HelperAudioDevice implements AudioDevice {
           if (type === 'A') this.emit({ type: 'mic', pcm: Buffer.from(payload) })
           else if (type === 'P') this.emit({ type: 'played', seq: payload.readUInt32LE(0) })
           else if (type === 'E') {
-            const e = JSON.parse(payload.toString()) as { type: string; message?: string; voiceProcessing?: boolean }
+            const e = JSON.parse(payload.toString()) as { type: string; message?: string; voiceProcessing?: boolean; micMode?: unknown }
             if (e.type === 'ready') {
               ready = true
-              this.emit({ type: 'ready', voiceProcessing: !!e.voiceProcessing })
+              this.emit({ type: 'ready', voiceProcessing: !!e.voiceProcessing, ...(typeof e.micMode === 'string' ? { micMode: e.micMode } : {}) })
               resolve()
             } else if (e.type === 'error') {
               this.lastError = e.message

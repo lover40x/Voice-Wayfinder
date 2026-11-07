@@ -274,8 +274,12 @@ export const register: Register = on => {
   // Typing while Claude asks or waits by voice answers that question at once,
   // instead of waiting in the queue until the voice tool returns.
   on('prompt.submit', async ($, e, next) => {
-    // Opened from the person's own command, the pane is placed at any width.
-    if (e.command && (e.command.name === 'voice-mode' || e.command.name.endsWith(':voice-mode'))) openPane($)
+    // Voice mode asked for by the person: turn the bridge back on after an End,
+    // and open the pane (from their own command it is placed at any width).
+    if (e.command && (e.command.name === 'voice-mode' || e.command.name.endsWith(':voice-mode'))) {
+      await control($, 'start')
+      openPane($)
+    }
     if (e.command || e.isMeta || e.attachments?.length || !TYPED_ORIGINS.has(e.origin.kind) || !e.text.trim()) return next(e)
     const s = await read($, voice)
     if (!s || !LIVE.has(s.activity)) return next(e)
@@ -375,7 +379,11 @@ export const register: Register = on => {
           {l.status !== 'ok' && l.status !== 'connecting' && <Text color="warning">{l.message ?? 'The voice bridge is not reachable.'}</Text>}
           {s?.error && <Text color="error">{s.error}</Text>}
           {s?.warning && <Text color="warning">{s.warning}</Text>}
-          {!live && s?.activity !== 'connecting' && <Text dimColor>Start with /voice-wayfinder:voice-mode, then /wayfinder.</Text>}
+          {!live && s?.activity !== 'connecting' && (
+            <Text dimColor>
+              {s?.stopped ? 'Voice ended. Claude carries on in text; ' : ''}Start with /voice-wayfinder:voice-mode{s?.stopped ? ' to talk again.' : ', then /wayfinder.'}
+            </Text>
+          )}
         </Box>
 
         {live && (card?.screen || asking) && (

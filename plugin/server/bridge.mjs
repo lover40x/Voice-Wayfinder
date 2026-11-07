@@ -40406,9 +40406,12 @@ var HelperAudioDevice = class {
   lastError;
   binary;
   echoCancellation;
-  constructor(binary, echoCancellation) {
+  autoGain;
+  /** `autoGain` false keeps voice processing from turning up a quiet room. */
+  constructor(binary, echoCancellation, autoGain = false) {
     this.binary = binary;
     this.echoCancellation = echoCancellation;
+    this.autoGain = autoGain;
   }
   onEvent(handler) {
     this.handlers.push(handler);
@@ -40425,7 +40428,7 @@ var HelperAudioDevice = class {
   }
   launch() {
     return new Promise((resolve2, reject) => {
-      const child = spawn(this.binary, this.echoCancellation ? ["--voice-processing"] : [], { stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(this.binary, [...this.echoCancellation ? ["--voice-processing"] : [], ...this.autoGain ? [] : ["--no-agc"]], { stdio: ["pipe", "pipe", "pipe"] });
       this.child = child;
       let ready = false;
       child.on("error", (err) => reject(new Error(`audio helper failed to start (${this.binary}): ${err.message}. Run npm run build:audio.`)));
@@ -40444,7 +40447,7 @@ var HelperAudioDevice = class {
             const e = JSON.parse(payload.toString());
             if (e.type === "ready") {
               ready = true;
-              this.emit({ type: "ready", voiceProcessing: !!e.voiceProcessing });
+              this.emit({ type: "ready", voiceProcessing: !!e.voiceProcessing, ...typeof e.micMode === "string" ? { micMode: e.micMode } : {} });
               resolve2();
             } else if (e.type === "error") {
               this.lastError = e.message;
@@ -40867,6 +40870,96 @@ ${text2}
   }
 };
 
+// bridge/src/gate.ts
+var CHUNK_MS = 10;
+var NoiseGate = class {
+  openDb;
+  minDb;
+  holdChunks;
+  lookahead;
+  chunkBytes;
+  floor;
+  rest = Buffer.alloc(0);
+  queue = [];
+  holdLeft = 0;
+  constructor(o = {}) {
+    this.openDb = o.openDb ?? 12;
+    this.minDb = o.minDb ?? -55;
+    this.holdChunks = Math.round((o.holdMs ?? 350) / CHUNK_MS);
+    this.lookahead = Math.round((o.lookaheadMs ?? 120) / CHUNK_MS);
+    this.chunkBytes = Math.round((o.sampleRate ?? 24e3) * CHUNK_MS / 1e3) * 2;
+  }
+  /** The room's level as learned so far, in dBFS. */
+  get noiseFloorDb() {
+    return this.floor;
+  }
+  /** Takes PCM16 mono; returns what to send on, delayed by the lookahead, gated sound zeroed. */
+  process(pcm) {
+    let data = this.rest.length ? Buffer.concat([this.rest, pcm]) : pcm;
+    const out = [];
+    while (data.length >= this.chunkBytes) {
+      const chunk = data.subarray(0, this.chunkBytes);
+      data = data.subarray(this.chunkBytes);
+      const sent = this.push(Buffer.from(chunk));
+      if (sent) out.push(sent);
+    }
+    this.rest = Buffer.from(data);
+    return Buffer.concat(out);
+  }
+  /** Forgets the queued audio (the mic was muted or the session restarted); keeps the room level. */
+  reset() {
+    this.queue = [];
+    this.rest = Buffer.alloc(0);
+    this.holdLeft = 0;
+  }
+  push(pcm) {
+    const level = levelDb(pcm);
+    const floor = this.learn(level);
+    const loud = level >= Math.max(floor + this.openDb, this.minDb);
+    if (loud) {
+      this.holdLeft = this.holdChunks;
+      for (const c2 of this.queue) c2.keep = true;
+    } else if (this.holdLeft > 0) this.holdLeft--;
+    this.queue.push({ pcm, keep: loud || this.holdLeft > 0 });
+    if (this.queue.length <= this.lookahead) return void 0;
+    const c = this.queue.shift();
+    return c.keep ? c.pcm : Buffer.alloc(c.pcm.length);
+  }
+  learn(level) {
+    if (this.floor === void 0) this.floor = level;
+    else if (level < this.floor) this.floor += (level - this.floor) * 0.5;
+    else this.floor += (level - this.floor) * 2e-3;
+    this.floor = Math.max(this.floor, -90);
+    return this.floor;
+  }
+};
+function levelDb(pcm) {
+  const n = Math.floor(pcm.length / 2);
+  if (!n) return -90;
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const v = pcm.readInt16LE(i * 2) / 32768;
+    sum += v * v;
+  }
+  const rms = Math.sqrt(sum / n);
+  return rms > 0 ? Math.max(-90, 20 * Math.log10(rms)) : -90;
+}
+var NOISE_WORDS = /^(อืม+|อือ+|เอ่อ+|อ่า+|อ้า+|อ๋อ|แค่ก+|ค่อก+|อะแฮ่ม|อะเฮ็ม|ฮึ+|หึ+|เฮ้อ+|hmm+|mm+|uh+|um+|ah+|oh|ehem|ahem|cough|\(.*\)|\[.*\])$/i;
+var HALLUCINATIONS = [
+  /ขอบคุณที่รับชม/,
+  /ติดตามตอนต่อไป/,
+  /กดติดตาม|กด subscribe|subscribe/i,
+  /ซับไตเติ้ล|subtitles? by/i,
+  /thank you for watching/i,
+  /thanks for watching/i
+];
+function isNoiseTranscript(text2) {
+  const t = text2.trim().replace(/[\s.,!?…。、"'“”‘’\-–—~*]+/g, " ").trim();
+  if (!t) return true;
+  if (t.split(" ").every((w) => NOISE_WORDS.test(w))) return true;
+  return HALLUCINATIONS.some((re) => re.test(t)) && t.length < 60;
+}
+
 // bridge/src/session.ts
 import { randomUUID } from "node:crypto";
 
@@ -40874,6 +40967,7 @@ import { randomUUID } from "node:crypto";
 var PROTOCOL_VERSION = 1;
 
 // bridge/src/session.ts
+var STOPPED = "The person ended voice mode (End). Continue in text and make no more voice calls until they start voice mode again.";
 var BYTES_PER_MS = 48;
 var MAX_LINES = 200;
 var MAX_REPEATS = 3;
@@ -40898,6 +40992,13 @@ var VoiceSession = class {
   muted = false;
   skipRequested = false;
   endRequested = false;
+  /**
+   * The person (or Claude, at the end) ended voice mode: no voice call speaks or
+   * listens again, and nothing reconnects, until voice mode is started again.
+   */
+  stopped = false;
+  gate;
+  micModeTold = false;
   lines = [];
   nextLineId = 1;
   card;
@@ -40927,11 +41028,13 @@ var VoiceSession = class {
   constructor(deps) {
     this.deps = deps;
     this.now = deps.now ?? Date.now;
+    if (deps.noiseGate !== false && deps.noiseGate !== void 0) this.gate = new NoiseGate(deps.noiseGate);
     this.tickMs = deps.tickMs ?? 50;
   }
   // ---- tools ---------------------------------------------------------------
   /** `card` is what goes on screen while this is spoken; each call replaces the last. */
   async say(text2, signal, card, slower = false) {
+    if (this.stopped) return { status: "ended", spokenMs: 0, detail: STOPPED };
     await this.ensureConnected();
     const provider = this.provider;
     if (this.speech) this.stopSpeech("cancelled");
@@ -40977,12 +41080,14 @@ var VoiceSession = class {
     });
   }
   async listen(timeoutMs, signal) {
+    if (this.stopped) return { status: "ended", text: "", parts: [] };
     await this.ensureConnected();
     const reply = await this.collectReply(timeoutMs, signal);
     if (reply.status === "replied") this.acknowledge();
     return reply;
   }
   async converse(text2, timeoutMs, signal, screen2) {
+    if (this.stopped) return { said: { status: "ended", spokenMs: 0, detail: STOPPED }, heardBefore: [], reply: { status: "ended", text: "", parts: [] }, repeats: 0 };
     await this.ensureConnected();
     const heardBefore = this.queue.splice(0).map((u) => u.text);
     const { said, reply, repeats } = await this.ask(text2, screen2 ? { screen: screen2 } : void 0, timeoutMs, signal);
@@ -40997,6 +41102,7 @@ var VoiceSession = class {
    * at once, so Claude thinks only once per round instead of once per question.
    */
   async interview(questions, timeoutMs, signal, screen2) {
+    if (this.stopped) return { heardBefore: [], answers: [], unasked: [...questions], ended: STOPPED };
     await this.ensureConnected();
     const heardBefore = this.queue.splice(0).map((u) => u.text);
     const answers = [];
@@ -41026,6 +41132,7 @@ var VoiceSession = class {
       case "mute":
         this.muted = true;
         this.userSpeaking = false;
+        this.gate?.reset();
         this.provider?.clearInput();
         this.touch();
         return done("Microphone muted.");
@@ -41039,8 +41146,15 @@ var VoiceSession = class {
         if (this.speech) this.stopSpeech("skipped");
         this.touch();
         return done("Question skipped.");
+      case "start":
+        this.stopped = false;
+        this.endRequested = false;
+        this.touch();
+        return done("Voice mode on. It connects on the first voice call.");
       case "end": {
+        this.stopped = true;
         this.endRequested = true;
+        this.queue = [];
         if (this.speech) this.stopSpeech("ended");
         const wasOn = !!this.provider;
         this.disconnect("Voice session ended.");
@@ -41098,6 +41212,7 @@ var VoiceSession = class {
       lastSession: this.lastSession,
       ...this.totals(),
       queuedUtterances: this.queue.length,
+      ...this.stopped ? { stopped: true } : {},
       partial: [...this.partials.values()].join(" ").trim() || void 0,
       warning: this.warning,
       error: this.error,
@@ -41140,6 +41255,7 @@ var VoiceSession = class {
     await this.connecting;
   }
   async connect() {
+    this.gate?.reset();
     this.endRequested = false;
     this.skipRequested = false;
     this.error = void 0;
@@ -41276,9 +41392,10 @@ var VoiceSession = class {
         this.heard.delete(e.itemId);
         const durationMs = heard?.durationMs;
         const tooShort = durationMs !== void 0 && durationMs < (this.deps.minUtteranceMs ?? 0);
-        if (heard) this.deps.log?.timing({ what: "heard", speechMs: durationMs ?? -1, transcribeMs: this.now() - heard.stoppedAt, dropped: tooShort ? "yes" : "no" });
         const text2 = e.text.trim();
-        if (text2 && !tooShort) {
+        const noise = !tooShort && isNoiseTranscript(text2);
+        if (heard) this.deps.log?.timing({ what: "heard", speechMs: durationMs ?? -1, transcribeMs: this.now() - heard.stoppedAt, dropped: tooShort ? "short" : noise ? "noise" : "no" });
+        if (text2 && !tooShort && !noise) {
           this.queue.push({ text: text2, at: this.now() });
           this.addLine("user", text2);
         }
@@ -41310,9 +41427,12 @@ var VoiceSession = class {
   onAudio(audio, e) {
     if (audio !== this.audio) return;
     switch (e.type) {
-      case "mic":
-        if (!this.muted) this.provider?.appendAudio(e.pcm);
+      case "mic": {
+        if (this.muted || !this.provider) return;
+        const pcm = this.gate ? this.gate.process(e.pcm) : e.pcm;
+        if (pcm.length) this.provider.appendAudio(pcm);
         return;
+      }
       case "played": {
         if (this.clipSeq !== void 0 && e.seq >= this.clipSeq) this.clipSeq = void 0;
         const speech = this.speech;
@@ -41331,6 +41451,11 @@ var VoiceSession = class {
         this.restartAudio();
         return;
       case "ready":
+        if (e.micMode && e.micMode !== "voiceIsolation" && !this.micModeTold) {
+          this.micModeTold = true;
+          this.warning = "For less room noise, turn on Voice Isolation while voice is on: Control Center \u2192 Mic Mode \u2192 Voice Isolation.";
+          this.changed();
+        }
         return;
     }
   }
@@ -41586,10 +41711,11 @@ var session = new VoiceSession({
     }
     return new OpenAIRealtimeProvider(cfg.openai, apiKey);
   },
-  createAudio: () => new HelperAudioDevice(join4(pluginRoot, "native", "vw-audio", "vw-audio"), cfg.audio.echoCancellation),
+  createAudio: () => new HelperAudioDevice(join4(pluginRoot, "native", "vw-audio", "vw-audio"), cfg.audio.echoCancellation, cfg.audio.autoGain ?? false),
   log: new TranscriptLog(cfg.logDir ?? defaultLogDir()),
   endOfReplyMs: cfg.conversation.endOfReplyMs,
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
+  noiseGate: cfg.audio.noiseGate?.enabled === false ? false : { ...cfg.audio.noiseGate },
   minUtteranceMs: cfg.conversation.minUtteranceMs,
   acknowledgements: cfg.conversation.acknowledgements,
   thinkingCue: thinkingCue(),
@@ -41629,7 +41755,7 @@ var describeSay = (r) => {
     case "skipped":
       return 'The person pressed "skip question" in the voice pane. Move on without an answer.';
     case "ended":
-      return "The person ended the voice session. Continue in text.";
+      return "The person ended voice mode. Continue in text, and make no more voice calls until they start voice mode again (they will ask).";
     case "cancelled":
       return "Speech cancelled.";
     case "failed":
@@ -41645,7 +41771,7 @@ var describeReply = (r) => {
     case "skipped":
       return "The person skipped this question.";
     case "ended":
-      return "The person ended the voice session. Continue in text.";
+      return "The person ended voice mode. Continue in text, and make no more voice calls until they start voice mode again (they will ask).";
     case "cancelled":
       return "Listening was cancelled.";
     case "disconnected":
@@ -41715,6 +41841,7 @@ server.registerTool(
     extra,
     () => session.interview(questions, (s ?? cfg.conversation.replyTimeoutSec) * 1e3, extra.signal, card),
     (r) => {
+      if (r.ended) return text(r.ended, r);
       const lines = [];
       if (r.heardBefore.length) lines.push(`Before the round the person had also said: ${r.heardBefore.join(" ")}`);
       r.answers.forEach((a, i) => {
@@ -41751,9 +41878,9 @@ server.registerTool(
   "voice_control",
   {
     title: "Voice control",
-    description: 'Mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
+    description: 'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
     inputSchema: {
-      action: external_exports.enum(["mute", "unmute", "skip", "end", "type", "take"]),
+      action: external_exports.enum(["start", "mute", "unmute", "skip", "end", "type", "take"]),
       text: external_exports.string().max(4e3).optional().describe('With "type": what the person typed.')
     }
   },

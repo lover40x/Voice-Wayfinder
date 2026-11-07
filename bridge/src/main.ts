@@ -40,10 +40,11 @@ const session = new VoiceSession({
     }
     return new OpenAIRealtimeProvider(cfg.openai, apiKey)
   },
-  createAudio: () => new HelperAudioDevice(join(pluginRoot, 'native', 'vw-audio', 'vw-audio'), cfg.audio.echoCancellation),
+  createAudio: () => new HelperAudioDevice(join(pluginRoot, 'native', 'vw-audio', 'vw-audio'), cfg.audio.echoCancellation, cfg.audio.autoGain ?? false),
   log: new TranscriptLog(cfg.logDir ?? defaultLogDir()),
   endOfReplyMs: cfg.conversation.endOfReplyMs,
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
+  noiseGate: cfg.audio.noiseGate?.enabled === false ? false : { ...cfg.audio.noiseGate },
   minUtteranceMs: cfg.conversation.minUtteranceMs,
   acknowledgements: cfg.conversation.acknowledgements,
   thinkingCue: thinkingCue(),
@@ -97,7 +98,7 @@ const describeSay = (r: SayResult) => {
     case 'skipped':
       return 'The person pressed "skip question" in the voice pane. Move on without an answer.'
     case 'ended':
-      return 'The person ended the voice session. Continue in text.'
+      return 'The person ended voice mode. Continue in text, and make no more voice calls until they start voice mode again (they will ask).'
     case 'cancelled':
       return 'Speech cancelled.'
     case 'failed':
@@ -116,7 +117,7 @@ const describeReply = (r: ReplyResult) => {
     case 'skipped':
       return 'The person skipped this question.'
     case 'ended':
-      return 'The person ended the voice session. Continue in text.'
+      return 'The person ended voice mode. Continue in text, and make no more voice calls until they start voice mode again (they will ask).'
     case 'cancelled':
       return 'Listening was cancelled.'
     case 'disconnected':
@@ -207,6 +208,7 @@ server.registerTool(
       extra as Extra,
       () => session.interview(questions, (s ?? cfg.conversation.replyTimeoutSec) * 1000, extra.signal, card),
       r => {
+        if (r.ended) return text(r.ended, r)
         const lines = []
         if (r.heardBefore.length) lines.push(`Before the round the person had also said: ${r.heardBefore.join(' ')}`)
         r.answers.forEach((a, i) => {
@@ -245,9 +247,9 @@ server.registerTool(
   {
     title: 'Voice control',
     description:
-      'Mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
+      'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
     inputSchema: {
-      action: z.enum(['mute', 'unmute', 'skip', 'end', 'type', 'take']),
+      action: z.enum(['start', 'mute', 'unmute', 'skip', 'end', 'type', 'take']),
       text: z.string().max(4000).optional().describe('With "type": what the person typed.'),
     },
   },

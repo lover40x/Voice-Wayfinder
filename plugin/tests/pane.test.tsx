@@ -258,11 +258,21 @@ test('slash commands are never taken as an answer', async ($, on) => {
   expect(calls.some(c => c.args.action === 'type')).toBe(false)
 })
 
-test('starting voice mode opens the pane as the person asked', async ($, on) => {
+test('starting voice mode turns the bridge back on and opens the pane as the person asked', async ($, on) => {
   const opened: string[] = []
-  bridge(on, STATE, [], true, opened)
+  const calls: Call[] = []
+  bridge(on, { ...STATE, activity: 'off', stopped: true }, calls, true, opened)
   await $.prompt.submit({ ...typedPrompt('/voice-wayfinder:voice-mode'), command: { name: 'voice-wayfinder:voice-mode', args: '' } })
   expect(opened).toContain('voice-pane')
+  expect(calls.some(c => c.tool === 'voice_control' && c.args.action === 'start')).toBe(true)
+})
+
+test('after End the pane says voice is off until voice mode is started again', async ($, on) => {
+  bridge(on, { ...STATE, activity: 'off', awaitingReply: false, stopped: true }, [])
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Voice ended/ }))?.text).toContain('/voice-wayfinder:voice-mode')
+  await ui.unmount()
 })
 
 /** Claude at work: connected, no question waiting, one thing said meanwhile. */

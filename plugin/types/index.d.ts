@@ -62,6 +62,8 @@ export type VoiceStateV1 = {
   todayCostUsd?: number
   monthCostUsd?: number
   queuedUtterances: number
+  /** Voice mode was ended (End): nothing speaks, listens or reconnects until it is started again. */
+  stopped?: true
   /** The words being heard right now, before the utterance is finished. */
   partial?: string
   warning?: string
@@ -75,9 +77,10 @@ export type VoiceStateUnchanged = { v: 1; rev: number; unchanged: true }
 
 /**
  * `type` delivers text the person typed as their answer (with `text`); `take`
- * hands over what they said while no question waited, answered with `heard`.
+ * hands over what they said while no question waited, answered with `heard`;
+ * `start` turns voice mode back on after `end`.
  */
-export type VoiceControlAction = 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take'
+export type VoiceControlAction = 'start' | 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take'
 
 /** Whether the pane can reach the bridge's MCP server. */
 export type BridgeLink = {

@@ -572,3 +572,76 @@ test('take leaves an utterance still being transcribed, and a waiting question k
   assert.deepEqual(session.control('take').heard, [])
   assert.equal((await reply).text, 'อีกเรื่อง')
 })
+
+test('after End nothing speaks or reconnects until voice mode is started again', async () => {
+  let connects = 0
+  const { provider, audio, session } = setup({ createProvider: () => (connects++, provider) })
+  const turn = session.converse('ข้อแรกค่ะ', 5000)
+  await tick()
+  session.control('end')
+  assert.equal((await turn).reply.status, 'ended')
+  // Claude finishes thinking and speaks again: refused, no reconnect, nothing said.
+  const said = provider.said.length
+  assert.equal((await session.say('เสร็จแล้วค่ะ')).status, 'ended')
+  assert.equal((await session.converse('ต่อเลยไหมคะ', 5000)).reply.status, 'ended')
+  assert.equal((await session.listen(5000)).status, 'ended')
+  assert.equal((await session.interview(['ข้อหนึ่ง'], 5000)).unasked.length, 1)
+  assert.equal(connects, 1)
+  assert.equal(provider.said.length, said)
+  assert.equal((session.state() as VoiceStateV1).stopped, true)
+  session.control('start')
+  const again = session.say('กลับมาแล้วค่ะ')
+  await tick()
+  speakThrough(provider, audio, `s${provider.said.length}`)
+  assert.equal((await again).status, 'completed')
+  assert.equal(connects, 2)
+})
+
+/** PCM16 of `ms` at a steady level (dBFS), a sine so it reads like sound. */
+function tone(ms: number, db: number, hz = 220): Buffer {
+  const n = Math.round(24 * ms)
+  const amp = Math.pow(10, db / 20) * 32767 * Math.SQRT2
+  const b = Buffer.alloc(n * 2)
+  for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(Math.max(-32767, Math.min(32767, amp * Math.sin((2 * Math.PI * hz * i) / 24000)))), i * 2)
+  return b
+}
+const peak = (b: Buffer) => {
+  let m = 0
+  for (let i = 0; i + 1 < b.length; i += 2) m = Math.max(m, Math.abs(b.readInt16LE(i)))
+  return m
+}
+
+test('the noise gate sends steady room noise as silence and a voice above it through, word start included', async () => {
+  const { NoiseGate } = await import('../src/gate.ts')
+  const gate = new NoiseGate()
+  // Two seconds of a fan at -45 dBFS: learned, then silenced.
+  const room = gate.process(tone(2000, -45, 120))
+  assert.equal(peak(room.subarray(room.length / 2)), 0)
+  // A voice 25 dB above it passes, and with the lookahead its first 100 ms too.
+  const voice = Buffer.concat([gate.process(tone(600, -20)), gate.process(tone(300, -45, 120))])
+  const startOfVoice = voice.subarray(voice.length - 2 * 24 * 900 + 2 * 24 * 120, voice.length - 2 * 24 * 900 + 2 * 24 * 220)
+  assert.ok(peak(startOfVoice) > 1000)
+  assert.ok(gate.noiseFloorDb! < -40)
+})
+
+test('a cough or a stock phrase invented from noise is not taken as an answer', async () => {
+  const { isNoiseTranscript } = await import('../src/gate.ts')
+  for (const t of ['', '...', 'อืม', 'อะแฮ่ม', 'แค่ก แค่ก', 'Hmm.', '(ไอ)', 'ขอบคุณที่รับชมค่ะ', 'Thank you for watching!']) assert.equal(isNoiseTranscript(t), true, t)
+  for (const t of ['ข้อสอง', '2', 'ใช่ค่ะ', 'อืม ข้อแรกดีกว่า', 'ใช้ GitHub']) assert.equal(isNoiseTranscript(t), false, t)
+  const { provider, session } = setup()
+  const reply = session.listen(300)
+  await tick()
+  provider.utter('อะแฮ่ม')
+  assert.equal((await reply).status, 'timeout')
+})
+
+test('with the gate on, the mic reaches the provider delayed and room noise as silence', async () => {
+  const { provider, audio, session } = setup({ noiseGate: {} })
+  const sent: Buffer[] = []
+  Object.assign(provider, { appendAudio: (pcm: Buffer) => void sent.push(pcm) })
+  await session.listen(10)
+  audio.emit({ type: 'mic', pcm: tone(2000, -50, 120) })
+  const all = Buffer.concat(sent)
+  assert.ok(all.length > 0 && all.length < tone(2000, -50).length)
+  assert.equal(peak(all.subarray(all.length / 2)), 0)
+})

@@ -6,14 +6,16 @@
 // stdout (helper -> bridge):
 //   'A' PCM16 mic samples   'P' u32 seq of the last buffer played back   'E' JSON event
 //
-// --voice-processing turns on macOS voice processing (echo cancellation), so
-// the mic does not hear Claude's own voice through the speakers.
+// --voice-processing turns on macOS voice processing (echo cancellation and
+// noise suppression), so the mic does not hear Claude's own voice through the
+// speakers. --no-agc keeps its automatic gain from turning up a quiet room.
 
 import AVFoundation
 import Foundation
 
 let sampleRate = 24_000.0
 let voiceProcessing = CommandLine.arguments.contains("--voice-processing")
+let autoGain = !CommandLine.arguments.contains("--no-agc")
 
 signal(SIGPIPE, SIG_IGN)
 
@@ -73,6 +75,8 @@ if voiceProcessing {
   do {
     try input.setVoiceProcessingEnabled(true)
     voiceProcessingOn = true
+    // Automatic gain lifts room noise along with a quiet voice; off unless asked.
+    input.isVoiceProcessingAGCEnabled = autoGain
     if #available(macOS 14.0, *) {
       input.voiceProcessingOtherAudioDuckingConfiguration =
         AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
@@ -205,7 +209,22 @@ do {
 player.play()
 readyAt = Date()
 micOpenAt = readyAt.addingTimeInterval(micSettle)
-event(["type": "ready", "inputRate": inFormat.sampleRate, "inputChannels": inFormat.channelCount, "voiceProcessing": voiceProcessingOn])
+/// The microphone mode the person picked in Control Center (Voice Isolation removes room noise).
+func micMode() -> String? {
+  if #available(macOS 12.0, *) {
+    switch AVCaptureDevice.activeMicrophoneMode {
+    case .standard: return "standard"
+    case .wideSpectrum: return "wideSpectrum"
+    case .voiceIsolation: return "voiceIsolation"
+    @unknown default: return nil
+    }
+  }
+  return nil
+}
+
+var ready: [String: Any] = ["type": "ready", "inputRate": inFormat.sampleRate, "inputChannels": inFormat.channelCount, "voiceProcessing": voiceProcessingOn]
+if voiceProcessingOn, let mode = micMode() { ready["micMode"] = mode }
+event(ready)
 
 // MARK: stdin
 
