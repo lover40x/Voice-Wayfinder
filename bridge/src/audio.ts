@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { join } from 'node:path'
 
 export type AudioEvent =
   | { type: 'mic'; pcm: Buffer }
@@ -15,6 +16,11 @@ export interface AudioDevice {
   /** Stops playback at once and drops everything queued. */
   flush(): void
   onEvent(handler: (e: AudioEvent) => void): void
+}
+
+/** The vw-audio helper built for this OS: vw-audio (macOS, Swift) or vw-audio.exe (Windows, C++). */
+export function helperPath(pluginRoot: string, platform: NodeJS.Platform = process.platform): string {
+  return join(pluginRoot, 'native', 'vw-audio', platform === 'win32' ? 'vw-audio.exe' : 'vw-audio')
 }
 
 class EchoCancellationUnavailable extends Error {}
@@ -52,7 +58,8 @@ export class HelperAudioDevice implements AudioDevice {
 
   private launch(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.binary, this.echoCancellation ? ['--voice-processing'] : [], { stdio: ['pipe', 'pipe', 'pipe'] })
+      // windowsHide: no console window flashes up for the helper on Windows.
+      const child = spawn(this.binary, this.echoCancellation ? ['--voice-processing'] : [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
       this.child = child
       let ready = false
       child.on('error', err => reject(new Error(`audio helper failed to start (${this.binary}): ${err.message}. Run npm run build:audio.`)))

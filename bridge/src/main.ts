@@ -1,4 +1,4 @@
-import { dirname, join, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 
 import { defaultClipDir, defaultLogDir, loadConfig, userConfigPath } from './config.ts'
-import { HelperAudioDevice } from './audio.ts'
+import { HelperAudioDevice, helperPath } from './audio.ts'
 import { ClipCache } from './clips.ts'
 import { TranscriptLog } from './log.ts'
 import { DEFAULT_INSTRUCTIONS, OpenAIRealtimeProvider } from './providers/openai-realtime.ts'
@@ -23,6 +23,12 @@ const apiKey = process.env[cfg.openai.apiKeyEnv]
 delete process.env[cfg.openai.apiKeyEnv]
 delete process.env.BWS_ACCESS_TOKEN
 
+function storeTokenHint() {
+  return process.platform === 'win32'
+    ? 'Store the bws access token in Windows Credential Manager with npm run setup (in the plugin repo), or: cmdkey /generic:voice-wayfinder-bws /user:%USERNAME% /pass'
+    : 'Store the bws access token with: security add-generic-password -s voice-wayfinder-bws -a "$USER" -w'
+}
+
 function thinkingCue() {
   const { thinkingCue: cue, thinkingCueAfterMs: afterMs, thinkingCueRepeatMs: repeatMs } = cfg.conversation
   if (!cue) return undefined
@@ -34,13 +40,12 @@ const session = new VoiceSession({
     if (!apiKey) {
       const why = process.env.VOICE_WAYFINDER_SECRET_PROBLEM ?? `${cfg.openai.apiKeyEnv} is not set`
       throw new Error(
-        `No OpenAI key: ${why}. Store the bws access token with: security add-generic-password -s voice-wayfinder-bws -a "$USER" -w ` +
-          `then restart Claude Code. See the README section "Secrets".`,
+        `No OpenAI key: ${why}. ${storeTokenHint()} then restart Claude Code. See the README section "Secrets".`,
       )
     }
     return new OpenAIRealtimeProvider(cfg.openai, apiKey)
   },
-  createAudio: () => new HelperAudioDevice(join(pluginRoot, 'native', 'vw-audio', 'vw-audio'), cfg.audio.echoCancellation),
+  createAudio: () => new HelperAudioDevice(helperPath(pluginRoot), cfg.audio.echoCancellation),
   log: new TranscriptLog(cfg.logDir ?? defaultLogDir()),
   endOfReplyMs: cfg.conversation.endOfReplyMs,
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,

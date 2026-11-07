@@ -57,12 +57,18 @@ export function loadConfig(pluginRoot: string): BridgeConfig {
 
 export function defaultClipDir(): string {
   if (process.env.CLAUDE_PLUGIN_DATA) return join(process.env.CLAUDE_PLUGIN_DATA, 'clips')
+  if (process.platform === 'win32') return join(localAppData(), 'voice-wayfinder', 'Cache', 'clips')
   return join(homedir(), 'Library', 'Caches', 'voice-wayfinder', 'clips')
 }
 
 export function defaultLogDir(): string {
   if (process.env.CLAUDE_PLUGIN_DATA) return join(process.env.CLAUDE_PLUGIN_DATA, 'transcripts')
+  if (process.platform === 'win32') return join(localAppData(), 'voice-wayfinder', 'Logs')
   return join(homedir(), 'Library', 'Logs', 'voice-wayfinder')
+}
+
+function localAppData(): string {
+  return process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local')
 }
 
 function deepMerge(base: unknown, over: unknown): unknown {

@@ -3,7 +3,9 @@ node_modules/
 *.log
 .env
 .env.*
-# Built per machine by plugin/scripts/build-audio.sh
+# Built per machine by plugin/scripts/build-audio.mjs
 plugin/native/vw-audio/vw-audio
+plugin/native/vw-audio/vw-audio.exe
+plugin/native/vw-audio/*.obj
 # Written by Claude Code when it loads the mod
 plugin/.claude-plugin/types/
