@@ -23,6 +23,10 @@ export type SessionDeps = {
   createAudio: () => AudioDevice
   log?: TranscriptLog
   endOfReplyMs: number
+  /** Quiet waited for when the reply so far sounds unfinished ("…แต่ว่า"): they are thinking, not done. */
+  unfinishedReplyMs?: number
+  /** Quiet that ends a reply in an open discussion (`converse` with `discuss`), where answers run long. */
+  discussEndOfReplyMs?: number
   idleDisconnectMs: number
   refreshAfterMs: number
   baseVocabulary: readonly string[]
@@ -107,6 +111,51 @@ const MAX_UNCLEAR = 2
 /** How often one round may go back to an earlier question because an answer was misheard. */
 const MAX_CORRECTIONS = 3
 
+/**
+ * Thai (and English) that leaves a thought open: "คิดว่าใช้ได้ แต่ว่า", "ถ้าเกิดว่า",
+ * "เอ่อ…". Server voice detection ends a turn on a pause; a reply that stops on
+ * one of these is waited for longer. (OpenAI's semantic turn detection splits
+ * Thai worse than a plain pause, even mid-word, so the bridge judges this itself.)
+ */
+const UNFINISHED =
+  /(แต่ว่า|แต่|ถ้าเกิดว่า|ถ้าเกิด|ถ้า|ว่า|ก็|และ|แล้วก็|คือ|เพราะว่า|เพราะ|ซึ่ง|หรือว่า|หรือ|กับ|เช่น|อย่างเช่น|แบบว่า|แบบ|ส่วน|โดย|เพื่อ|อืม+|เอ่อ+|อ่า+|\band\b|\bbut\b|\bso\b|\bbecause\b|\bor\b|\.\.\.|…)$/i
+
+/** True when the reply so far stops in the middle of a thought. */
+export function soundsUnfinished(text: string): boolean {
+  const t = text.trim().replace(/[,，、]+$/, '').trim()
+  return t.length > 0 && UNFINISHED.test(t)
+}
+
+const UNFINISHED_REPLY_MS = 3500
+const DISCUSS_END_OF_REPLY_MS = 1200
+
+/** Recognition hints sent at most. */
+const MAX_VOCABULARY = 80
+// Common English words, not worth a hint.
+const PLAIN_WORDS = new Set(
+  'the a an and or but if of to in on at for by with from as is are be it this that these those not no yes ok all any each one two new old yet only also then than so do does can will may should must per via vs etc recommended recommendation question choice see use add set get'.split(' '),
+)
+
+/**
+ * The English terms in a question and its card ("Owned Unit", "serial", "SKU",
+ * "Add Serial Number"), for recognition to spell them as written instead of in
+ * Thai letters. Capitalised words that follow each other stay one term. A
+ * lowercase word counts only beside Thai ("จาก serial ใช้ได้ไหม"): in an
+ * English sentence on the card it is mostly plain English ("first").
+ */
+export function vocabularyFrom(text: string): string[] {
+  const plain = text.replace(/`[^`]*`|https?:\/\/\S+/g, ' ').replace(/[*_#>|[\]()]/g, ' ')
+  const out: string[] = []
+  for (const m of plain.matchAll(/[A-Za-z][A-Za-z0-9+.#-]*(?:\s+[A-Z][A-Za-z0-9+.#-]*)*/g)) {
+    const term = m[0].replace(/^Q\d+\s+/, '').replace(/[.-]+$/, '').trim()
+    if (term.length < 3 || term.length > 40 || PLAIN_WORDS.has(term.toLowerCase())) continue
+    if (/^Q\d+$/.test(term)) continue
+    if (/^[a-z]/.test(term) && !/[ก-๙]\s*$/.test(plain.slice(0, m.index)) && !/^\s*[ก-๙]/.test(plain.slice(m.index + m[0].length))) continue
+    out.push(term)
+  }
+  return [...new Set(out)]
+}
+
 // "I didn't catch that / say it again", in the ways people say it. Matched only
 // on a short utterance, so an answer that happens to contain "again" is kept.
 const REPEAT =
@@ -174,6 +223,8 @@ export class VoiceSession {
   private lines: TranscriptLine[] = []
   private nextLineId = 1
   private card?: VoiceCard
+  /** The recognition hints last sent, joined: sent again only when they change. */
+  private vocabularyKey = ''
   private rev = 1
   private spend = { speech: 0, transcription: 0, understanding: 0 }
   private spokenMs = 0
@@ -246,6 +297,7 @@ export class VoiceSession {
     if (this.speech) this.stopSpeech('cancelled')
     clearTimeout(this.cueTimer)
     this.card = card
+    this.updateVocabulary(provider, text, card)
     const line = this.addLine('claude', text)
     const requestedAt = this.now()
     if (this.lastReplyAt !== undefined) {
@@ -295,11 +347,16 @@ export class VoiceSession {
     return reply
   }
 
-  async converse(text: string, timeoutMs: number, signal?: AbortSignal, screen?: string): Promise<ConverseResult> {
+  /**
+   * Speaks one question and returns the reply. With `discuss`, the question is
+   * open: the person may talk at length, so the reply ends on a longer pause,
+   * and it goes to Claude as said, without the answer check (Claude follows up).
+   */
+  async converse(text: string, timeoutMs: number, signal?: AbortSignal, screen?: string, discuss = false): Promise<ConverseResult> {
     if (this.stopped) return { said: { status: 'ended', spokenMs: 0, detail: STOPPED }, heardBefore: [], reply: { status: 'ended', text: '', parts: [] }, repeats: 0 }
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
-    const { said, reply, repeats, understood } = await this.ask(text, screen ? { screen } : undefined, timeoutMs, signal, '', this.lastAnswer)
+    const { said, reply, repeats, understood } = await this.ask(text, screen ? { screen } : undefined, timeoutMs, signal, '', this.lastAnswer, discuss)
     if (!reply || reply.status === 'navigated') {
       if (said.status === 'skipped') this.skipRequested = false
       const pausedMs = said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}
@@ -1027,6 +1084,7 @@ export class VoiceSession {
     signal?: AbortSignal,
     lead = '',
     previous?: { question: string; answer: string },
+    discuss = false,
   ): Promise<{ said: SayResult; repeats: number; reply?: ReplyResult; understood?: Understanding }> {
     let repeats = 0
     let unclear = 0
@@ -1043,10 +1101,11 @@ export class VoiceSession {
       // Spoken over this question: when, so a "no" to the last confirmation is told from an answer.
       const cutInAfterMs = speak && said.status === 'interrupted' ? said.spokenMs : undefined
       speak = true
-      const reply = await this.collectReply(timeoutMs, signal)
+      const reply = await this.collectReply(timeoutMs, signal, discuss ? (this.deps.discussEndOfReplyMs ?? DISCUSS_END_OF_REPLY_MS) : undefined)
       if (reply.status !== 'replied') return { said, repeats, reply }
-      // A typed reply is meant as written; a spoken one is checked against the question.
-      const understood = reply.typed ? undefined : await this.understandReply(question, card, reply.text, signal, previous, cutInAfterMs)
+      // A typed reply is meant as written; a spoken one is checked against the
+      // question, except in a discussion, where Claude reads it and follows up.
+      const understood = reply.typed || discuss ? undefined : await this.understandReply(question, card, reply.text, signal, previous, cutInAfterMs)
       const kind = understood?.kind ?? (isRepeatRequest(reply.text) ? 'repeat' : 'answer')
       if (kind === 'repeat' && repeats < MAX_REPEATS) {
         repeats++
@@ -1131,7 +1190,7 @@ export class VoiceSession {
     speech.finish(status, detail)
   }
 
-  private async collectReply(timeoutMs: number, signal?: AbortSignal): Promise<ReplyResult> {
+  private async collectReply(timeoutMs: number, signal?: AbortSignal, endOfReplyMs = this.deps.endOfReplyMs): Promise<ReplyResult> {
     clearTimeout(this.cueTimer)
     this.awaiting = true
     this.changed()
@@ -1172,7 +1231,9 @@ export class VoiceSession {
         const busy = this.userSpeaking || this.pending.size > 0
         if (busy) lastHeardAt = this.now()
         // A typed answer is finished when it is sent: no quiet window to wait out.
-        const quietEnough = typed || this.now() - lastHeardAt >= this.deps.endOfReplyMs
+        // A reply stopping on "แต่ว่า…" is a thinking pause: wait longer for the rest.
+        const quiet = soundsUnfinished(parts.join(' ')) ? Math.max(endOfReplyMs, this.deps.unfinishedReplyMs ?? UNFINISHED_REPLY_MS) : endOfReplyMs
+        const quietEnough = typed || this.now() - lastHeardAt >= quiet
         if (parts.length && !busy && quietEnough) {
           this.lastReplyAt = this.now()
           return result('replied')
@@ -1197,8 +1258,18 @@ export class VoiceSession {
     return 'idle'
   }
 
-  private vocabulary(): string[] {
-    return [...new Set(this.deps.baseVocabulary)]
+  /** Recognition hints: the English terms of what is being asked first, then the configured ones. */
+  private vocabulary(text = '', screen = ''): string[] {
+    return [...new Set([...vocabularyFrom(`${text}\n${screen}`), ...this.deps.baseVocabulary])].slice(0, MAX_VOCABULARY)
+  }
+
+  /** Sends the terms of the question being asked as recognition hints, when they changed. */
+  private updateVocabulary(provider: VoiceProvider, text: string, card: VoiceCard | undefined) {
+    const terms = this.vocabulary(text, card?.screen)
+    const key = terms.join('\n')
+    if (key === this.vocabularyKey) return
+    this.vocabularyKey = key
+    provider.setVocabulary(terms)
   }
 
   private addLine(who: TranscriptLine['who'], text: string, extra: Partial<TranscriptLine> = {}): TranscriptLine {

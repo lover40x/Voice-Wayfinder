@@ -40661,7 +40661,7 @@ var SCHEMA = {
   }
 };
 var MISHEARD_YES = /^(ไทย|ไท|ไฮ|ไฉ่|ใฉ่|ฉ่าย|ชัย|ไช|ไช่|ใช้)(ค่ะ|คะ|ครับ|จ้ะ|จ้า)?[.!]?$/;
-var MISHEARD_USABLE = /^((?:บอกว่า|คิดว่า|ก็)?\s*)เชื่อได้/;
+var MISHEARD_USABLE = /^((?:บอกว่า|คิดว่า|ก็)?\s*)(?:เชื่อได้|ใครได้|ให้ได้|ไช้ได้)/;
 function normaliseHeard(heard, question = "") {
   const t = heard.trim();
   if (MISHEARD_YES.test(t)) return "\u0E43\u0E0A\u0E48";
@@ -40783,22 +40783,33 @@ ${r.card}` : "No on-screen card.", `Their earlier answer: ${r.review.answer}`, `
 }
 var MIN_ANSWER_CONFIDENCE = 0.4;
 var MIN_ANSWER_MASS = 0.6;
+var MIN_MASS_CHARS = 15;
 var ANSWER_KINDS = /* @__PURE__ */ new Set(["yes", "no", "choice", "free_answer"]);
 function answerMass(k) {
   if (!k?.probabilities?.length) return void 0;
   return k.probabilities.reduce((sum, p) => typeof p.value === "string" && ANSWER_KINDS.has(p.value) ? sum + p.probability : sum, 0);
 }
+var LONG_REPLY_CHARS = 50;
+var isLong = (heard) => heard.replace(/\s/g, "").length >= LONG_REPLY_CHARS;
+var QUESTION_AGAIN = /คำถาม\S{0,10}?(ใหม่|อีก|หน่อย)|ทวน|ถามใหม่|ถามอีกที|อ่านใหม่|พูดใหม่/;
 var HEDGE = /แต่|แค่|ยกเว้น|เว้นแต่|นอกจาก|\bbut\b|\bexcept\b/i;
 function readDecisions(answers, r, minConfidence = MIN_ANSWER_CONFIDENCE) {
   const k = answers.find((a) => a.name === "kind" && a.type === "choice");
   const kind = k?.choice;
   if (typeof kind !== "string") return void 0;
   const heard = normaliseHeard(r.heard, r.question);
+  const unsureKind = typeof k?.confidence === "number" && k.confidence < minConfidence;
   const mass = answerMass(k);
-  const lowConfidence = typeof k?.confidence === "number" && k.confidence < minConfidence && !(mass !== void 0 && mass >= MIN_ANSWER_MASS);
+  const surelyAnswer = mass !== void 0 && mass >= MIN_ANSWER_MASS && heard.replace(/\s/g, "").length >= MIN_MASS_CHARS;
+  const lowConfidence = unsureKind && !surelyAnswer;
   if (r.review) return readReview(kind, answers, r, lowConfidence);
-  const unsure = lowConfidence && !YES_NO_START.test(heard);
-  if (unsure && ANSWER_KINDS.has(kind)) return { kind: "unclear", answer: "", echo: "" };
+  const yesOrNo = YES_NO_START.test(heard);
+  if ((unsureKind || kind === "unclear") && kind !== "repeat" && !yesOrNo && !isLong(heard) && QUESTION_AGAIN.test(heard)) return { kind: "repeat", answer: "", echo: "" };
+  const unsure = lowConfidence && !yesOrNo;
+  if (unsure && ANSWER_KINDS.has(kind) || kind === "unclear") {
+    if (isLong(heard)) return { kind: "answer", answer: r.heard.trim(), echo: "" };
+    return { kind: "unclear", answer: "", echo: "" };
+  }
   const which = answers.find((a) => a.name === "which" && a.type === "choice")?.choice;
   const picked = typeof which === "string" && which !== "none" ? cardChoices(r.card, r.questionNo).find((c) => c.value === which) : void 0;
   const n = picked ? Number(picked.value) : void 0;
@@ -41107,7 +41118,7 @@ ${text2}
   transcription() {
     const { model, language, prompt } = this.cfg.transcription;
     const out = { model };
-    if (model === "gpt-live-transcribe") out.languages = [language];
+    if (model === "gpt-live-transcribe" || model === "gpt-transcribe") out.languages = [language];
     else out.language = language;
     if (this.vocabulary.length && (model === "gpt-transcribe" || model === "gpt-live-transcribe")) out.keywords = this.vocabulary.slice(0, 80);
     if (prompt && model !== "gpt-realtime-whisper") out.prompt = prompt;
@@ -41305,6 +41316,29 @@ var MAX_LINES = 200;
 var MAX_REPEATS = 3;
 var MAX_UNCLEAR = 2;
 var MAX_CORRECTIONS = 3;
+var UNFINISHED = /(แต่ว่า|แต่|ถ้าเกิดว่า|ถ้าเกิด|ถ้า|ว่า|ก็|และ|แล้วก็|คือ|เพราะว่า|เพราะ|ซึ่ง|หรือว่า|หรือ|กับ|เช่น|อย่างเช่น|แบบว่า|แบบ|ส่วน|โดย|เพื่อ|อืม+|เอ่อ+|อ่า+|\band\b|\bbut\b|\bso\b|\bbecause\b|\bor\b|\.\.\.|…)$/i;
+function soundsUnfinished(text2) {
+  const t = text2.trim().replace(/[,，、]+$/, "").trim();
+  return t.length > 0 && UNFINISHED.test(t);
+}
+var UNFINISHED_REPLY_MS = 3500;
+var DISCUSS_END_OF_REPLY_MS = 1200;
+var MAX_VOCABULARY = 80;
+var PLAIN_WORDS = new Set(
+  "the a an and or but if of to in on at for by with from as is are be it this that these those not no yes ok all any each one two new old yet only also then than so do does can will may should must per via vs etc recommended recommendation question choice see use add set get".split(" ")
+);
+function vocabularyFrom(text2) {
+  const plain = text2.replace(/`[^`]*`|https?:\/\/\S+/g, " ").replace(/[*_#>|[\]()]/g, " ");
+  const out = [];
+  for (const m of plain.matchAll(/[A-Za-z][A-Za-z0-9+.#-]*(?:\s+[A-Z][A-Za-z0-9+.#-]*)*/g)) {
+    const term = m[0].replace(/^Q\d+\s+/, "").replace(/[.-]+$/, "").trim();
+    if (term.length < 3 || term.length > 40 || PLAIN_WORDS.has(term.toLowerCase())) continue;
+    if (/^Q\d+$/.test(term)) continue;
+    if (/^[a-z]/.test(term) && !/[ก-๙]\s*$/.test(plain.slice(0, m.index)) && !/^\s*[ก-๙]/.test(plain.slice(m.index + m[0].length))) continue;
+    out.push(term);
+  }
+  return [...new Set(out)];
+}
 var REPEAT = /ฟังไม่ทัน|ไม่ได้ยิน|ได้ยินไม่ชัด|ฟังไม่ชัด|อีกที|อีกรอบ|อีกครั้ง|พูดใหม่|ถามใหม่|พูดอีก|พูดซ้ำ|ถามซ้ำ|ทวนคำถาม|ทวนอีก|ทวนหน่อย|ทวนให้|อะไรนะ|ว่าไงนะ|ว่าอะไรนะ|พูดช้า|ช้าๆ|\brepeat\b|\bagain\b|\bpardon\b|say that|didn'?t catch/i;
 var NOT_REPEAT = /ไม่ต้อง|ไม่เป็นไร|อย่า|ทำไม|พอแล้ว|เข้าใจแล้ว|ได้ยินแล้ว|\b(don'?t|no need|why|stop)\b/i;
 var ANSWER = /(^|\s)(ใช่|ไม่ใช่|ได้|ไม่ได้|โอเค|ok|okay|ตกลง|ถูก|ถูกต้อง|yes|no)(ค่ะ|คะ|ครับ|จ้ะ|จ้า|นะ)?($|\s)|ข้อ\s*(หนึ่ง|สอง|สาม|สี่|ห้า|แรก|\d)|\d/i;
@@ -41356,6 +41390,8 @@ var VoiceSession = class {
   lines = [];
   nextLineId = 1;
   card;
+  /** The recognition hints last sent, joined: sent again only when they change. */
+  vocabularyKey = "";
   rev = 1;
   spend = { speech: 0, transcription: 0, understanding: 0 };
   spokenMs = 0;
@@ -41420,6 +41456,7 @@ var VoiceSession = class {
     if (this.speech) this.stopSpeech("cancelled");
     clearTimeout(this.cueTimer);
     this.card = card;
+    this.updateVocabulary(provider, text2, card);
     const line = this.addLine("claude", text2);
     const requestedAt = this.now();
     if (this.lastReplyAt !== void 0) {
@@ -41467,11 +41504,16 @@ var VoiceSession = class {
     if (reply.status === "replied") this.acknowledge();
     return reply;
   }
-  async converse(text2, timeoutMs, signal, screen2) {
+  /**
+   * Speaks one question and returns the reply. With `discuss`, the question is
+   * open: the person may talk at length, so the reply ends on a longer pause,
+   * and it goes to Claude as said, without the answer check (Claude follows up).
+   */
+  async converse(text2, timeoutMs, signal, screen2, discuss = false) {
     if (this.stopped) return { said: { status: "ended", spokenMs: 0, detail: STOPPED }, heardBefore: [], reply: { status: "ended", text: "", parts: [] }, repeats: 0 };
     await this.ensureConnected();
     const heardBefore = this.queue.splice(0).map((u) => u.text);
-    const { said, reply, repeats, understood } = await this.ask(text2, screen2 ? { screen: screen2 } : void 0, timeoutMs, signal, "", this.lastAnswer);
+    const { said, reply, repeats, understood } = await this.ask(text2, screen2 ? { screen: screen2 } : void 0, timeoutMs, signal, "", this.lastAnswer, discuss);
     if (!reply || reply.status === "navigated") {
       if (said.status === "skipped") this.skipRequested = false;
       const pausedMs = said.pausedMs !== void 0 ? { pausedMs: said.pausedMs } : {};
@@ -42134,7 +42176,7 @@ var VoiceSession = class {
    * Speaks a question and collects the answer. "I didn't catch that" is no
    * answer: the question is asked again, a little slower, until one comes.
    */
-  async ask(question, card, timeoutMs, signal, lead = "", previous) {
+  async ask(question, card, timeoutMs, signal, lead = "", previous, discuss = false) {
     let repeats = 0;
     let unclear = 0;
     let text2 = lead ? `${lead} ${question}` : question;
@@ -42149,9 +42191,9 @@ var VoiceSession = class {
       }
       const cutInAfterMs = speak && said.status === "interrupted" ? said.spokenMs : void 0;
       speak = true;
-      const reply = await this.collectReply(timeoutMs, signal);
+      const reply = await this.collectReply(timeoutMs, signal, discuss ? this.deps.discussEndOfReplyMs ?? DISCUSS_END_OF_REPLY_MS : void 0);
       if (reply.status !== "replied") return { said, repeats, reply };
-      const understood = reply.typed ? void 0 : await this.understandReply(question, card, reply.text, signal, previous, cutInAfterMs);
+      const understood = reply.typed || discuss ? void 0 : await this.understandReply(question, card, reply.text, signal, previous, cutInAfterMs);
       const kind = understood?.kind ?? (isRepeatRequest(reply.text) ? "repeat" : "answer");
       if (kind === "repeat" && repeats < MAX_REPEATS) {
         repeats++;
@@ -42221,7 +42263,7 @@ var VoiceSession = class {
     this.provider?.interrupt(speech.id);
     speech.finish(status, detail);
   }
-  async collectReply(timeoutMs, signal) {
+  async collectReply(timeoutMs, signal, endOfReplyMs = this.deps.endOfReplyMs) {
     clearTimeout(this.cueTimer);
     this.awaiting = true;
     this.changed();
@@ -42258,7 +42300,8 @@ var VoiceSession = class {
         }
         const busy = this.userSpeaking || this.pending.size > 0;
         if (busy) lastHeardAt = this.now();
-        const quietEnough = typed || this.now() - lastHeardAt >= this.deps.endOfReplyMs;
+        const quiet = soundsUnfinished(parts.join(" ")) ? Math.max(endOfReplyMs, this.deps.unfinishedReplyMs ?? UNFINISHED_REPLY_MS) : endOfReplyMs;
+        const quietEnough = typed || this.now() - lastHeardAt >= quiet;
         if (parts.length && !busy && quietEnough) {
           this.lastReplyAt = this.now();
           return result("replied");
@@ -42281,8 +42324,18 @@ var VoiceSession = class {
     if (this.awaiting) return "listening";
     return "idle";
   }
-  vocabulary() {
-    return [...new Set(this.deps.baseVocabulary)];
+  /** Recognition hints: the English terms of what is being asked first, then the configured ones. */
+  vocabulary(text2 = "", screen2 = "") {
+    return [.../* @__PURE__ */ new Set([...vocabularyFrom(`${text2}
+${screen2}`), ...this.deps.baseVocabulary])].slice(0, MAX_VOCABULARY);
+  }
+  /** Sends the terms of the question being asked as recognition hints, when they changed. */
+  updateVocabulary(provider, text2, card) {
+    const terms = this.vocabulary(text2, card?.screen);
+    const key = terms.join("\n");
+    if (key === this.vocabularyKey) return;
+    this.vocabularyKey = key;
+    provider.setVocabulary(terms);
   }
   addLine(who, text2, extra = {}) {
     const line = { ...extra, id: this.nextLineId++, at: this.now(), who, text: text2 };
@@ -42390,6 +42443,8 @@ var session = new VoiceSession({
   createAudio: () => new HelperAudioDevice(helperPath(pluginRoot), cfg.audio.echoCancellation, cfg.audio.autoGain ?? false),
   log: new TranscriptLog(cfg.logDir ?? defaultLogDir()),
   endOfReplyMs: cfg.conversation.endOfReplyMs,
+  ...cfg.conversation.unfinishedReplyMs !== void 0 ? { unfinishedReplyMs: cfg.conversation.unfinishedReplyMs } : {},
+  ...cfg.conversation.discussEndOfReplyMs !== void 0 ? { discussEndOfReplyMs: cfg.conversation.discussEndOfReplyMs } : {},
   recapAfterPauseMs: (cfg.conversation.recapAfterPauseSec ?? 60) * 1e3,
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
   noiseGate: cfg.audio.noiseGate?.enabled === false ? false : { ...cfg.audio.noiseGate },
@@ -42510,16 +42565,17 @@ server.registerTool(
   "voice_converse",
   {
     title: "Ask by voice",
-    description: "Speak a question in Thai, then wait for the person's spoken reply and return its transcript. Handles barge-in: if they interrupt, speech stops and the interruption is treated as their reply. The main tool for grilling and decision turns.",
+    description: "Speak a question in Thai, then wait for the person's spoken reply and return its transcript. Handles barge-in: if they interrupt, speech stops and the interruption is treated as their reply. The main tool for grilling and decision turns. With discuss, the question is open: the person may explain at length and pause to think, and the reply comes back as said for you to follow up on.",
     inputSchema: {
       text: external_exports.string().min(1).max(2e3).describe("One question, in short natural spoken Thai. No code, tables, lists or URLs."),
       screen,
-      timeoutSec
+      timeoutSec,
+      discuss: external_exports.boolean().optional().describe("An open question to talk through (requirements, how something should work), not a yes/no: waits through longer thinking pauses and skips the quick answer check.")
     }
   },
-  ({ text: t, screen: card, timeoutSec: s }, extra) => guarded(
+  ({ text: t, screen: card, timeoutSec: s, discuss }, extra) => guarded(
     extra,
-    () => session.converse(t, (s ?? cfg.conversation.replyTimeoutSec) * 1e3, extra.signal, card),
+    () => session.converse(t, (s ?? cfg.conversation.replyTimeoutSec) * 1e3, extra.signal, card, discuss ?? false),
     (r) => {
       const lines = [];
       if (r.heardBefore.length) lines.push(`Before this question the person had also said: ${r.heardBefore.join(" ")}`);

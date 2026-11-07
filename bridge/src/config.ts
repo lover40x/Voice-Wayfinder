@@ -42,6 +42,10 @@ export type BridgeConfig = {
   }
   conversation: {
     endOfReplyMs: number
+    /** Quiet waited for when a reply stops mid-thought ("…แต่ว่า"). */
+    unfinishedReplyMs?: number
+    /** Quiet that ends a reply in an open discussion (`voice_converse` with `discuss`). */
+    discussEndOfReplyMs?: number
     replyTimeoutSec: number
     bargeInConfirmMs: number
     minUtteranceMs: number

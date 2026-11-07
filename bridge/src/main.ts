@@ -50,6 +50,8 @@ const session = new VoiceSession({
   createAudio: () => new HelperAudioDevice(helperPath(pluginRoot), cfg.audio.echoCancellation, cfg.audio.autoGain ?? false),
   log: new TranscriptLog(cfg.logDir ?? defaultLogDir()),
   endOfReplyMs: cfg.conversation.endOfReplyMs,
+  ...(cfg.conversation.unfinishedReplyMs !== undefined ? { unfinishedReplyMs: cfg.conversation.unfinishedReplyMs } : {}),
+  ...(cfg.conversation.discussEndOfReplyMs !== undefined ? { discussEndOfReplyMs: cfg.conversation.discussEndOfReplyMs } : {}),
   recapAfterPauseMs: (cfg.conversation.recapAfterPauseSec ?? 60) * 1000,
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
   noiseGate: cfg.audio.noiseGate?.enabled === false ? false : { ...cfg.audio.noiseGate },
@@ -206,17 +208,21 @@ server.registerTool(
   {
     title: 'Ask by voice',
     description:
-      "Speak a question in Thai, then wait for the person's spoken reply and return its transcript. Handles barge-in: if they interrupt, speech stops and the interruption is treated as their reply. The main tool for grilling and decision turns.",
+      "Speak a question in Thai, then wait for the person's spoken reply and return its transcript. Handles barge-in: if they interrupt, speech stops and the interruption is treated as their reply. The main tool for grilling and decision turns. With discuss, the question is open: the person may explain at length and pause to think, and the reply comes back as said for you to follow up on.",
     inputSchema: {
       text: z.string().min(1).max(2000).describe('One question, in short natural spoken Thai. No code, tables, lists or URLs.'),
       screen,
       timeoutSec,
+      discuss: z
+        .boolean()
+        .optional()
+        .describe('An open question to talk through (requirements, how something should work), not a yes/no: waits through longer thinking pauses and skips the quick answer check.'),
     },
   },
-  ({ text: t, screen: card, timeoutSec: s }, extra) =>
+  ({ text: t, screen: card, timeoutSec: s, discuss }, extra) =>
     guarded(
       extra as Extra,
-      () => session.converse(t, (s ?? cfg.conversation.replyTimeoutSec) * 1000, extra.signal, card),
+      () => session.converse(t, (s ?? cfg.conversation.replyTimeoutSec) * 1000, extra.signal, card, discuss ?? false),
       r => {
         const lines = []
         if (r.heardBefore.length) lines.push(`Before this question the person had also said: ${r.heardBefore.join(' ')}`)

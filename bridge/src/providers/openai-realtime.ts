@@ -251,7 +251,8 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
   private transcription() {
     const { model, language, prompt } = this.cfg.transcription
     const out: Record<string, unknown> = { model }
-    if (model === 'gpt-live-transcribe') out.languages = [language]
+    // The newer models take a list of language hints in place of `language`; never both.
+    if (model === 'gpt-live-transcribe' || model === 'gpt-transcribe') out.languages = [language]
     else out.language = language
     // Vocabulary goes only to models with a keywords field. A word list in
     // `prompt` gets transcribed back verbatim when the mic hears only noise.

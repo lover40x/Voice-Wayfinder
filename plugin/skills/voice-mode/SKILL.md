@@ -16,15 +16,29 @@ The person follows in the voice pane and the captions above the prompt: the ques
 
 ## Asking
 
-- A grilling round (several questions whose prerequisites are all settled) goes through `voice_interview`, the whole round in one call: the bridge asks each in turn and acknowledges each answer itself, so the person never waits on you between them.
-- A single question, or a follow-up that depends on an answer just heard, goes through `voice_converse`.
-- Every question goes with `screen`: Markdown with the full question, numbered answer choices and your recommendation (for a round, every question numbered Q1, Q2, …). That card is what the person reads; the pane marks which question is being asked. Don't also write the card in the chat.
+Pick, per question, how to ask it. Requirements are found by talking, not by a string of yes/no: a quick round is for what only needs a confirmation.
+
+**Quick confirmation**: you have a recommendation they will most likely take, and a yes, no or choice number settles it.
+
+- Several of these whose prerequisites are all settled go in one `voice_interview` round: the bridge asks each in turn and acknowledges each answer itself, so the person never waits on you between them. A single one goes through `voice_converse`.
 - Speak only the short version: the question in one sentence and the choice you recommend ("ข้อสอง แนะนำให้ส่งแจ้งเตือนเข้ากลุ่ม Lark ของสาขา ใช้ได้ไหมคะ"). Never read the choices out one by one.
+
+**Open question**: how something should work, who does what, edge cases, a trade-off where their reasoning matters, or a reply that came back with a condition ("yes, with a condition: …") or a long explanation.
+
+- Talk it through with `voice_converse` and `discuss: true`. Ask it in one or two sentences, with your current thinking if you have some for them to react to.
+- They may talk at length and pause to think; the bridge waits for them, and the reply comes back as said, without the quick answer check. Recognition may garble words in a long reply: read it for its meaning in context, and say back the terms that matter.
+- Follow up one question at a time, again with `discuss: true`, on what is unclear, missing, or at odds with an earlier decision. Before each follow-up, say in a sentence what you understood so far, so they can correct it.
+- Stop when you can state the decision in one sentence; then confirm it (see Deciding). Don't drag it out: two or three exchanges usually settle one point.
+- When answers in a round come back with conditions or explanations, talk those through this way after the round, before recording them.
+
+Both kinds:
+
+- Every question goes with `screen`: Markdown with the full question, numbered answer choices if there are any, and your recommendation (for a round, every question numbered Q1, Q2, …). In a discussion, keep the card current: what is settled so far and the open point. That card is what the person reads; the pane marks which question is being asked. Don't also write the card in the chat.
 - Never type a question and wait for a typed answer while voice mode is on.
 
 ## Speaking
 
-- Short, natural Thai: one sentence of about 15 words, two at most. Polite and consistent: the default voice (`marin`) speaks as a woman, so end with ค่ะ/คะ.
+- Short, natural Thai: one sentence of about 15 words, two at most (in a discussion, a third to say back what you understood). Polite and consistent: the default voice (`marin`) speaks as a woman, so end with ค่ะ/คะ.
 - English technical terms, product names and ticket names stay in English inside the Thai sentence.
 - Never speak code, tables, ticket bodies, URLs or issue numbers. Put them in `screen`.
 - The bridge already says a short "ค่ะ" the moment an answer is complete, and plays a soft tone while you take a while. Don't open your next turn with an acknowledgement of your own.
@@ -36,7 +50,7 @@ Every second you spend between their reply and your next question is dead air fo
 ## Hearing
 
 - Answers may be a choice number ("ข้อสอง", "2", "อันแรก"), a yes to your recommendation, or free words. Map a number to the choice on that question's card.
-- The bridge checks each spoken reply against its question before moving on: noise or garbled words get "ขอโทษค่ะ ได้ยินไม่ชัด…" and are listened for again, an answer is confirmed aloud by a short ready clip ("ใช่ค่ะ", "ข้อสองนะคะ"), and a question back or another subject stops a `voice_interview` round and comes to you. Results say how each reply was understood ("Understood as: …"); trust that over a raw transcript that looks odd, and answer a question back before asking again (the unasked questions are listed). Inside a round the bridge itself goes back when they say an answer was misheard; when a result says a previous answer was heard wrong, say "เมื่อกี้น่าจะฟังผิดค่ะ", ask that question again, and fix your notes before going on.
+- Outside a discussion, the bridge checks each spoken reply against its question before moving on: noise or garbled words get "ขอโทษค่ะ ได้ยินไม่ชัด…" and are listened for again, an answer is confirmed aloud by a short ready clip ("ใช่ค่ะ", "ข้อสองนะคะ"), and a question back or another subject stops a `voice_interview` round and comes to you. Results say how each reply was understood ("Understood as: …"); trust that over a raw transcript that looks odd, and answer a question back before asking again (the unasked questions are listed). Inside a round the bridge itself goes back when they say an answer was misheard; when a result says a previous answer was heard wrong, say "เมื่อกี้น่าจะฟังผิดค่ะ", ask that question again, and fix your notes before going on.
 - "ฟังไม่ทัน", "อีกที", "อะไรนะ" and the like are no answer: the bridge asks the question again, a little slower, and returns only the real answer, with `repeats` saying how often it repeated. When a question needed repeats, make the next ones shorter.
 - Spoken answers are Thai speech recognition with English mixed in; terms can be misheard. When an answer contains a term that will land in the tracker (a ticket name, a product, an API), repeat it back in your confirmation.
 - Typed answers come back marked typed: take their words as written. Typed while you are working, an answer arrives as a normal message: treat it as their answer or new input, as you would a spoken one, and stay in voice mode.

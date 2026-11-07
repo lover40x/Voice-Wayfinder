@@ -62,13 +62,13 @@ export const SCHEMA = {
 // "ใช่" before the model sees it, which otherwise guesses either way.
 const MISHEARD_YES = /^(ไทย|ไท|ไฮ|ไฉ่|ใฉ่|ฉ่าย|ชัย|ไช|ไช่|ใช้)(ค่ะ|คะ|ครับ|จ้ะ|จ้า)?[.!]?$/
 
-// "ใช้ได้" heard as "เชื่อได้" (live logs), at the start of a reply to "…ใช้ได้ไหมคะ".
-const MISHEARD_USABLE = /^((?:บอกว่า|คิดว่า|ก็)?\s*)เชื่อได้/
+// "ใช้ได้" heard as "เชื่อได้", "ใครได้" or "ให้ได้" (live logs), at the start of a reply to "…ใช้ได้ไหมคะ".
+const MISHEARD_USABLE = /^((?:บอกว่า|คิดว่า|ก็)?\s*)(?:เชื่อได้|ใครได้|ให้ได้|ไช้ได้)/
 
 /**
  * A lone word recognition is known to make of "ใช่" becomes "ใช่", and a
- * "เชื่อได้" opening a reply to "ใช้ได้ไหม" becomes "ใช้ได้"; anything else is
- * kept as heard.
+ * "เชื่อได้"/"ใครได้"/"ให้ได้" opening a reply to "ใช้ได้ไหม" becomes "ใช้ได้";
+ * anything else is kept as heard.
  */
 export function normaliseHeard(heard: string, question = ''): string {
   const t = heard.trim()
@@ -233,6 +233,8 @@ export const MIN_ANSWER_CONFIDENCE = 0.4
  * noise and talk to someone else summed to 0.21–0.53.
  */
 export const MIN_ANSWER_MASS = 0.6
+/** The answer-mass rule only counts for replies at least this long (letters, spaces aside). */
+const MIN_MASS_CHARS = 15
 const ANSWER_KINDS = new Set(['yes', 'no', 'choice', 'free_answer'])
 
 /** How likely the reply is an answer of any kind, when the model gave its probabilities. */
@@ -240,6 +242,21 @@ function answerMass(k: DecisionAnswer | undefined): number | undefined {
   if (!k?.probabilities?.length) return undefined
   return k.probabilities.reduce((sum, p) => (typeof p.value === 'string' && ANSWER_KINDS.has(p.value) ? sum + p.probability : sum), 0)
 }
+
+/**
+ * A reply this long (letters, spaces aside) is never noise: noise comes out as
+ * a few random words, but a long reply is someone explaining, even when
+ * recognition garbled parts of it. It goes to Claude as said, who has the
+ * context to read it.
+ */
+export const LONG_REPLY_CHARS = 50
+const isLong = (heard: string) => heard.replace(/\s/g, '').length >= LONG_REPLY_CHARS
+
+/**
+ * Asking to hear the question again, through recognition's mishearings of
+ * "ทวน" ("หวานคำถามขอห้ามหน่อย", "บนคำถามข้อห้าใหม่ให้น้อง", seen live).
+ */
+const QUESTION_AGAIN = /คำถาม\S{0,10}?(ใหม่|อีก|หน่อย)|ทวน|ถามใหม่|ถามอีกที|อ่านใหม่|พูดใหม่/
 
 /** "ใช้ได้ แต่ว่า…": a yes that sets a condition. */
 const HEDGE = /แต่|แค่|ยกเว้น|เว้นแต่|นอกจาก|\bbut\b|\bexcept\b/i
@@ -254,12 +271,23 @@ export function readDecisions(
   const kind = k?.choice
   if (typeof kind !== 'string') return undefined
   const heard = normaliseHeard(r.heard, r.question)
+  const unsureKind = typeof k?.confidence === 'number' && k.confidence < minConfidence
+  // Split between answer kinds counts as an answer, for a reply of some length:
+  // a short noise word ("เฮ้ย", "ผิดหวังบน") can also sum high over yes and no.
   const mass = answerMass(k)
-  const lowConfidence = typeof k?.confidence === 'number' && k.confidence < minConfidence && !(mass !== undefined && mass >= MIN_ANSWER_MASS)
+  const surelyAnswer = mass !== undefined && mass >= MIN_ANSWER_MASS && heard.replace(/\s/g, '').length >= MIN_MASS_CHARS
+  const lowConfidence = unsureKind && !surelyAnswer
   if (r.review) return readReview(kind, answers, r, lowConfidence)
+  const yesOrNo = YES_NO_START.test(heard)
+  // "ทวนคำถาม…" misheard reads as an unsure answer: it asks for the question again.
+  if ((unsureKind || kind === 'unclear') && kind !== 'repeat' && !yesOrNo && !isLong(heard) && QUESTION_AGAIN.test(heard)) return { kind: 'repeat', answer: '', echo: '' }
   // Noise reads as a low-confidence answer; a reply that opens with a plain yes or no is kept.
-  const unsure = lowConfidence && !YES_NO_START.test(heard)
-  if (unsure && ANSWER_KINDS.has(kind)) return { kind: 'unclear', answer: '', echo: '' }
+  const unsure = lowConfidence && !yesOrNo
+  if ((unsure && ANSWER_KINDS.has(kind)) || kind === 'unclear') {
+    // A long explanation with garbled parts: Claude reads it, rather than "ได้ยินไม่ชัด" again.
+    if (isLong(heard)) return { kind: 'answer', answer: r.heard.trim(), echo: '' }
+    return { kind: 'unclear', answer: '', echo: '' }
+  }
   const which = answers.find(a => a.name === 'which' && a.type === 'choice')?.choice
   const picked = typeof which === 'string' && which !== 'none' ? cardChoices(r.card, r.questionNo).find(c => c.value === which) : undefined
   const n = picked ? Number(picked.value) : undefined

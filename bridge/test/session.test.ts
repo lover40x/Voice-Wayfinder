@@ -990,6 +990,40 @@ test('a yes-with-a-condition split between kinds is still an answer, with its wo
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.9 }], { ...req, heard: 'ใช่ ไม่ต้องถามใหม่' })?.echo, 'ใช่ค่ะ')
 })
 
+test('a long explanation is never taken for noise, and a garbled "ทวนคำถาม" repeats', async () => {
+  const { readDecisions } = await import('../src/understand.ts')
+  const question = 'ข้อหก ถ้าเครื่องถูกย้ายไปเป็นของคนอื่น ลิงก์ผู้ติดต่อแทนของเครื่องนั้นหลุดไปด้วย ใช้ได้ไหมคะ'
+  const unclear = [{ type: 'choice', name: 'kind', choice: 'unclear', confidence: 0.5 }]
+  // Seen live: a coherent explanation with a few misheard words got "ได้ยินไม่ชัด" twice.
+  const heard =
+    'เวลาที่เรา เปลี่ยนเมนโปรไฟล์ แอสซิสแตนท์ลิงก์มันจะไม่ต่อกับซีเรียลนั้นแล้ว แต่ว่ามันควรจะยังต่อกับเมนโปรไฟล์อันเดิมอยู่'
+  assert.deepEqual(readDecisions(unclear, { question, heard }), { kind: 'answer', answer: heard, echo: '' })
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'free_answer', confidence: 0.2 }], { question, heard })?.kind, 'answer')
+  // Short noise and a short aside to someone else are still asked again.
+  for (const h of ['เหรอ', 'เฮ้ย', 'เขาก็อยากจะกลับไปเรียนเหมือนกัน', 'แม่จ๋า มากจัง']) assert.equal(readDecisions(unclear, { question, heard: h })?.kind, 'unclear', h)
+  // "ทวนคำถามข้อห้า…" as recognition heard it.
+  for (const h of ['หวานคำถามขอห้ามหน่อย ครับ', 'บนคำถามข้อห้าใหม่ให้น้อง', 'ทวนอีกทีได้ไหม']) assert.equal(readDecisions(unclear, { question, heard: h })?.kind, 'repeat', h)
+  // Luna read it as an unsure yes, with yes and no summing high: still a repeat.
+  const unsureYes = [{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.27, probabilities: [{ value: 'yes', probability: 0.3 }, { value: 'free_answer', probability: 0.25 }, { value: 'no', probability: 0.2 }] }]
+  assert.equal(readDecisions(unsureYes, { question, heard: 'บนคำถามข้อห้าใหม่ให้น้อง' })?.kind, 'repeat')
+  // A short noise word summing high over the answer kinds is still noise.
+  for (const h of ['เฮ้ย', 'ผิดหวังบน']) assert.equal(readDecisions(unsureYes, { question, heard: h })?.kind, 'unclear', h)
+  // "ใช่ ไม่ต้องถามใหม่" is a yes, not a repeat.
+  assert.equal(readDecisions(unsureYes, { question, heard: 'ใช่ ไม่ต้องถามใหม่' })?.kind, 'answer')
+})
+
+test('"ใครได้" and "ให้ได้" opening a reply to "ใช้ได้ไหม" read as "ใช้ได้"', async () => {
+  const { normaliseHeard, readDecisions } = await import('../src/understand.ts')
+  const question = 'ข้อสาม ใช้ serial lookup เดียวกัน ใช้ได้ไหมคะ'
+  assert.equal(normaliseHeard('ใครได้', question), 'ใช้ได้')
+  assert.equal(normaliseHeard('ใครได้ แต่ว่าต้องเตือนก่อน', question), 'ใช้ได้ แต่ว่าต้องเตือนก่อน')
+  assert.equal(normaliseHeard('คิดว่าให้ได้', question), 'คิดว่าใช้ได้')
+  // Only when that is what was asked: "ใครได้รับแจ้งเตือน" is a real question.
+  assert.equal(normaliseHeard('ใครได้รับแจ้งเตือน', 'ข้อสอง แจ้งเตือนไปที่กลุ่ม Lark ดีไหมคะ'), 'ใครได้รับแจ้งเตือน')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'question', confidence: 0.3 }], { question, heard: 'ใครได้' })?.kind, 'question')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.2 }], { question, heard: 'ใครได้' })?.kind, 'answer')
+})
+
 /** Reads review replies (keep / change) and answers the way Luna did live. */
 const reads = (r: UnderstandRequest): Understanding | undefined => {
   if (r.review) return r.heard === 'เหมือนเดิม' ? { kind: 'keep', answer: '', echo: '' } : r.heard === 'เปลี่ยน' ? { kind: 'change', answer: '', echo: '' } : undefined
@@ -1122,4 +1156,59 @@ test('a read-back reply is understood with words when there is no model', async 
   assert.equal(choiceNumber('ข้อ 3'), 3)
   assert.equal(choiceNumber('ไม่รู้'), undefined)
   assert.equal(spokenAnswer({ kind: 'answer', answer: '2. Linear', echo: '' }, 'ข้อสอง'), 'ข้อสอง Linear')
+})
+
+test('the English terms of the question and its card become recognition hints', async () => {
+  const { vocabularyFrom } = await import('../src/session.ts')
+  assert.deepEqual(
+    vocabularyFrom('ข้อสาม ถ้า SKU ไม่ตรงกับแถว Legacy ใช้ได้ไหมคะ กด dismiss แล้ว\n**Q3 Owned Unit**\n1. Add Serial Number then retry first (recommended)\n2. See `foo_bar` at https://x.io'),
+    ['SKU', 'Legacy', 'dismiss', 'Owned Unit', 'Add Serial Number'],
+  )
+  assert.deepEqual(vocabularyFrom('ใช้ได้ไหมคะ'), [])
+
+  const { provider, audio, session } = setup()
+  void session.converse('ข้อหนึ่ง เสนอ Proposal จาก serial ใช้ได้ไหมคะ', 5000, undefined, '**Q1** Owned Unit Proposal\n1. Check SupplyChainOS first')
+  await tick()
+  assert.deepEqual(provider.vocabulary, ['Proposal', 'serial', 'Owned Unit Proposal', 'Check SupplyChainOS', 'Wayfinder'])
+  speakThrough(provider, audio, 's1')
+  provider.utter('ใช่')
+  await tick(80)
+  session.control('end')
+})
+
+test('a reply that stops mid-thought is waited for, so a thinking pause does not end it', async () => {
+  const { soundsUnfinished } = await import('../src/session.ts')
+  for (const t of ['คิดว่าใช้ได้ แต่ว่า', 'ถ้าเกิดว่า', 'คือ', 'เอ่อ', 'อันนี้ได้นะ แบบว่า', 'บอกว่าเชื่อได้แต่ว่า...', 'but'])
+    assert.equal(soundsUnfinished(t), true, t)
+  for (const t of ['ใช้ได้ค่ะ', 'ได้แล้ว', 'ทวนคำถามให้หน่อย', 'ไม่เอา', '']) assert.equal(soundsUnfinished(t), false, t)
+
+  const { provider, audio, session } = setup({ endOfReplyMs: 40, unfinishedReplyMs: 400 })
+  const turn = session.converse('ข้อหก ใช้ได้ไหมคะ', 5000)
+  await tick()
+  speakThrough(provider, audio, 's1')
+  await tick()
+  provider.utter('คิดว่าใช้ได้ แต่ว่า', 'a')
+  await tick(150) // longer than endOfReplyMs: a finished reply would have been taken by now
+  provider.utter('ต้องเตือนก่อนลบนะ', 'b')
+  const r = await turn
+  assert.equal(r.reply.text, 'คิดว่าใช้ได้ แต่ว่า ต้องเตือนก่อนลบนะ')
+  session.control('end')
+})
+
+test('a discussion waits through longer pauses and goes to Claude as said, unchecked', async () => {
+  const { provider, audio, session } = setup({ endOfReplyMs: 40, discussEndOfReplyMs: 300 })
+  provider.understandWith = () => ({ kind: 'unclear', answer: '', echo: '' })
+  const turn = session.converse('ข้อหก เล่าให้ฟังหน่อยว่าลิงก์ควรติดกับอะไรคะ', 5000, undefined, undefined, true)
+  await tick()
+  speakThrough(provider, audio, 's1')
+  await tick()
+  provider.utter('มันควรติดกับโปรไฟล์เดิม', 'a')
+  await tick(120)
+  provider.utter('เพราะคนส่งแทนยังเป็นคนเดิม', 'b')
+  const r = await turn
+  assert.equal(r.reply.text, 'มันควรติดกับโปรไฟล์เดิม เพราะคนส่งแทนยังเป็นคนเดิม')
+  assert.equal(r.understood, undefined)
+  assert.equal(provider.understood.length, 0, 'no answer check in a discussion')
+  assert.equal(r.repeats, 0)
+  session.control('end')
 })
