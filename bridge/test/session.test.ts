@@ -958,6 +958,36 @@ test('a reply that opens with a plain yes or no is kept even when the model is u
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'no', confidence: 0.3 }], req)?.kind, 'answer')
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.12 }], { ...req, heard: 'แม่จ๋า มากจัง' })?.kind, 'unclear')
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.2 }], { ...req, heard: 'ได้ยินไม่ชัด' })?.kind, 'unclear')
+  // Openings seen live: "ใช้ได้", "ใช่ได้", "คิดว่า…", "บอกว่า…", and "เชื่อได้" for "ใช้ได้".
+  for (const heard of ['ใช่ได้ แต่ว่าถ้าเกิดเมนู Add Serial Number', 'บอกว่าใช้ได้ แต่ว่าถ้าเกิดพนักงานแอด', 'คิดว่าใช้ได้แต่ว่า', 'เชื่อได้', 'บอกว่าเชื่อได้แต่ว่าห้ามแอด'])
+    assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'free_answer', confidence: 0.26 }], { ...req, heard })?.kind, 'answer', heard)
+  // "เชื่อได้" is taken for "ใช้ได้" only when that is what was asked.
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.26 }], { question: 'ข้อสาม ใครดูแลคะ', heard: 'เชื่อได้' })?.kind, 'unclear')
+})
+
+test('a yes-with-a-condition split between kinds is still an answer, with its words kept', async () => {
+  const { readDecisions, spokenAnswer } = await import('../src/understand.ts')
+  const p = (yes: number, free: number, unclear: number) => [
+    { value: 'free_answer', probability: free },
+    { value: 'yes', probability: yes },
+    { value: 'unclear', probability: unclear },
+  ]
+  const req = { question: 'ข้อห้า serial ที่พนักงานพิมพ์ก็นับ ใช้ได้ไหมคะ', heard: 'ต้องเพิ่มเป็น suggestion ไม่ใช่ว่าเราจะแอดเข้าไปเป็น asset ของลูกค้าเลย' }
+  // Live: free_answer 0.41, yes 0.24, no 0.13: unsure of the kind, sure it is an answer.
+  const split = readDecisions([{ type: 'choice', name: 'kind', choice: 'free_answer', confidence: 0.34, probabilities: [...p(0.24, 0.41, 0.05), { value: 'no', probability: 0.13 }] }], req)
+  assert.equal(split?.kind, 'answer')
+  assert.equal(split?.answer, req.heard)
+  // Noise spreads over unclear: still asked again.
+  const noise = readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.3, probabilities: p(0.3, 0.1, 0.5) }], { ...req, heard: 'แม่จ๋า มากจัง' })
+  assert.equal(noise?.kind, 'unclear')
+
+  // A yes with "แต่…" keeps the condition and is not confirmed as a bare "ใช่ค่ะ".
+  const heard = 'ใช่ได้ แต่ว่าถ้าเกิดพนักงานแอดเองก็ยังต้องแอดได้'
+  const hedged = readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.44 }], { ...req, heard })
+  assert.deepEqual(hedged, { kind: 'answer', answer: `yes, with a condition: ${heard}`, echo: '' })
+  assert.equal(spokenAnswer(hedged, heard), heard)
+  // A plain yes is still "ใช่ค่ะ".
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.9 }], { ...req, heard: 'ใช่ ไม่ต้องถามใหม่' })?.echo, 'ใช่ค่ะ')
 })
 
 /** Reads review replies (keep / change) and answers the way Luna did live. */

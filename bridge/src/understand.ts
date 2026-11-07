@@ -62,10 +62,18 @@ export const SCHEMA = {
 // "ใช่" before the model sees it, which otherwise guesses either way.
 const MISHEARD_YES = /^(ไทย|ไท|ไฮ|ไฉ่|ใฉ่|ฉ่าย|ชัย|ไช|ไช่|ใช้)(ค่ะ|คะ|ครับ|จ้ะ|จ้า)?[.!]?$/
 
-/** A lone word recognition is known to make of "ใช่" becomes "ใช่"; anything else is kept as heard. */
-export function normaliseHeard(heard: string): string {
+// "ใช้ได้" heard as "เชื่อได้" (live logs), at the start of a reply to "…ใช้ได้ไหมคะ".
+const MISHEARD_USABLE = /^((?:บอกว่า|คิดว่า|ก็)?\s*)เชื่อได้/
+
+/**
+ * A lone word recognition is known to make of "ใช่" becomes "ใช่", and a
+ * "เชื่อได้" opening a reply to "ใช้ได้ไหม" becomes "ใช้ได้"; anything else is
+ * kept as heard.
+ */
+export function normaliseHeard(heard: string, question = ''): string {
   const t = heard.trim()
-  return MISHEARD_YES.test(t) ? 'ใช่' : t
+  if (MISHEARD_YES.test(t)) return 'ใช่'
+  return /ใช้ได้ไหม/.test(question) ? t.replace(MISHEARD_USABLE, '$1ใช้ได้') : t
 }
 
 export function userMessage(r: UnderstandRequest): string {
@@ -74,7 +82,7 @@ export function userMessage(r: UnderstandRequest): string {
     `Question asked: ${r.question}`,
     r.card ? `On-screen card:\n${r.card}` : 'No on-screen card.',
     ...(r.cutInAfterMs !== undefined ? [`They spoke over this question ${(r.cutInAfterMs / 1000).toFixed(1)} s after it began.`] : []),
-    `Heard: ${normaliseHeard(r.heard)}`,
+    `Heard: ${normaliseHeard(r.heard, r.question)}`,
   ].join('\n\n')
 }
 
@@ -180,7 +188,7 @@ export function decisionsRequest(model: string, r: UnderstandRequest & { questio
         choices: [...choices, { value: 'none', description: 'None of them.' }],
       })
     }
-    const input = [`Question: ${r.question}`, r.card ? `On-screen card:\n${r.card}` : 'No on-screen card.', `Their earlier answer: ${r.review.answer}`, `Heard now: ${normaliseHeard(r.heard)}`].join('\n\n')
+    const input = [`Question: ${r.question}`, r.card ? `On-screen card:\n${r.card}` : 'No on-screen card.', `Their earlier answer: ${r.review.answer}`, `Heard now: ${normaliseHeard(r.heard, r.question)}`].join('\n\n')
     return { model, input, questions }
   }
   const questions: unknown[] = [
@@ -203,7 +211,13 @@ export function decisionsRequest(model: string, r: UnderstandRequest & { questio
   return { model, input: userMessage(r), questions }
 }
 
-type DecisionAnswer = { type: string; name?: string | null; choice?: string | boolean; confidence?: number }
+export type DecisionAnswer = {
+  type: string
+  name?: string | null
+  choice?: string | boolean
+  confidence?: number
+  probabilities?: readonly { value: string | boolean; probability: number }[]
+}
 
 /**
  * Below this confidence an "answer" is taken as noise: in live tests real
@@ -211,6 +225,24 @@ type DecisionAnswer = { type: string; name?: string | null; choice?: string | bo
  * 0.12–0.25, spread over several kinds.
  */
 export const MIN_ANSWER_CONFIDENCE = 0.4
+
+/**
+ * ...unless the answer kinds together are this likely. "ใช้ได้ แต่ว่า…" splits
+ * between yes and free_answer (0.50 / 0.36), so neither is sure, yet it is
+ * plainly an answer (0.64–0.94 together in live tests with the round's card);
+ * noise and talk to someone else summed to 0.21–0.53.
+ */
+export const MIN_ANSWER_MASS = 0.6
+const ANSWER_KINDS = new Set(['yes', 'no', 'choice', 'free_answer'])
+
+/** How likely the reply is an answer of any kind, when the model gave its probabilities. */
+function answerMass(k: DecisionAnswer | undefined): number | undefined {
+  if (!k?.probabilities?.length) return undefined
+  return k.probabilities.reduce((sum, p) => (typeof p.value === 'string' && ANSWER_KINDS.has(p.value) ? sum + p.probability : sum), 0)
+}
+
+/** "ใช้ได้ แต่ว่า…": a yes that sets a condition. */
+const HEDGE = /แต่|แค่|ยกเว้น|เว้นแต่|นอกจาก|\bbut\b|\bexcept\b/i
 
 /** Turns the typed answers into an Understanding, with a fixed confirmation phrase. */
 export function readDecisions(
@@ -221,15 +253,20 @@ export function readDecisions(
   const k = answers.find(a => a.name === 'kind' && a.type === 'choice')
   const kind = k?.choice
   if (typeof kind !== 'string') return undefined
-  if (r.review) return readReview(kind, answers, r, typeof k?.confidence === 'number' && k.confidence < minConfidence)
+  const heard = normaliseHeard(r.heard, r.question)
+  const mass = answerMass(k)
+  const lowConfidence = typeof k?.confidence === 'number' && k.confidence < minConfidence && !(mass !== undefined && mass >= MIN_ANSWER_MASS)
+  if (r.review) return readReview(kind, answers, r, lowConfidence)
   // Noise reads as a low-confidence answer; a reply that opens with a plain yes or no is kept.
-  const unsure = typeof k?.confidence === 'number' && k.confidence < minConfidence && !YES_NO_START.test(r.heard.trim())
-  if (unsure && (kind === 'yes' || kind === 'no' || kind === 'choice' || kind === 'free_answer')) return { kind: 'unclear', answer: '', echo: '' }
+  const unsure = lowConfidence && !YES_NO_START.test(heard)
+  if (unsure && ANSWER_KINDS.has(kind)) return { kind: 'unclear', answer: '', echo: '' }
   const which = answers.find(a => a.name === 'which' && a.type === 'choice')?.choice
   const picked = typeof which === 'string' && which !== 'none' ? cardChoices(r.card, r.questionNo).find(c => c.value === which) : undefined
   const n = picked ? Number(picked.value) : undefined
   switch (kind) {
     case 'yes':
+      // A yes with a condition is not a plain "ใช่ค่ะ": keep their words, acknowledge plainly.
+      if (HEDGE.test(heard)) return { kind: 'answer', answer: `yes, with a condition: ${r.heard.trim()}`, echo: '' }
       return { kind: 'answer', answer: picked ? `yes (${picked.value}. ${picked.description})` : 'yes', echo: ECHO.yes }
     case 'no':
       return { kind: 'answer', answer: 'no', echo: ECHO.no }
@@ -252,8 +289,12 @@ export function readDecisions(
 
 // ---- rules on top of either model ---------------------------------------------
 
-/** A reply that opens with a plain yes or no is an answer however unsure the model is. */
-const YES_NO_START = /^(ใช่|ไม่ใช่|ได้|ไม่ได้|โอเค|ok|okay|ไม่|เอา|ไม่เอา|ถูก|ไม่ถูก|yes|no)(?![ก-๙])|^(ใช่|ไม่ใช่|ได้|ไม่ได้|ไม่|ถูก)(ค่ะ|คะ|ครับ|ๆ|นะ)/i
+/**
+ * A reply that opens with a plain yes or no is an answer however unsure the
+ * model is: "ใช่", "ใช้ได้ แต่ว่า…", "คิดว่าใช้ได้", "บอกว่าไม่เอา".
+ */
+const YES_NO_START =
+  /^(?:บอกว่า|คิดว่า|ก็)?\s*(?:ไม่ใช่|ใช้ไม่ได้|ไม่ได้|ไม่เอา|ไม่ถูก|ใช้ได้|ใช่ได้|ได้เลย|ใช่|ได้|โอเค|ok|okay|ไม่|เอา|ถูก|yes|no)(?=$|[^ก-๙]|ค่ะ|คะ|ครับ|ๆ|นะ|แต่|แค่|เลย)/i
 /** Words that point back at the previous answer. */
 const BACK = /เมื่อกี้|เมื่อกี๊|ข้อที่แล้ว|ข้อก่อน|ข้อเมื่อกี้|ฟังผิด|ได้ยินผิด|ย้อนกลับ|ย้อนไป|กลับไปข้อ|แก้ข้อ|แก้คำตอบ|เปลี่ยนคำตอบ|previous|go back/i
 /** Spoken over the very start of a question: they cannot have heard it yet. */
@@ -333,6 +374,8 @@ export function reviewByWords(heard: string): Understanding | undefined {
 /** How an earlier answer is read back aloud: "ใช่", "ไม่ใช่", "ข้อสอง Linear", or their words. */
 export function spokenAnswer(u: Understanding | undefined, heard: string): string {
   if (!u || u.kind !== 'answer') return heard
+  const hedged = /^yes, with a condition: (.+)$/s.exec(u.answer)
+  if (hedged) return hedged[1]!
   if (/^yes\b/.test(u.answer)) return 'ใช่'
   if (/^no\b/.test(u.answer)) return 'ไม่ใช่'
   const m = /^(\d{1,2})\.\s*(.*)$/.exec(u.answer)

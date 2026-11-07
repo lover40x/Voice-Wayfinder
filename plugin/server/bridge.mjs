@@ -40661,9 +40661,11 @@ var SCHEMA = {
   }
 };
 var MISHEARD_YES = /^(ไทย|ไท|ไฮ|ไฉ่|ใฉ่|ฉ่าย|ชัย|ไช|ไช่|ใช้)(ค่ะ|คะ|ครับ|จ้ะ|จ้า)?[.!]?$/;
-function normaliseHeard(heard) {
+var MISHEARD_USABLE = /^((?:บอกว่า|คิดว่า|ก็)?\s*)เชื่อได้/;
+function normaliseHeard(heard, question = "") {
   const t = heard.trim();
-  return MISHEARD_YES.test(t) ? "\u0E43\u0E0A\u0E48" : t;
+  if (MISHEARD_YES.test(t)) return "\u0E43\u0E0A\u0E48";
+  return /ใช้ได้ไหม/.test(question) ? t.replace(MISHEARD_USABLE, "$1\u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49") : t;
 }
 function userMessage(r) {
   return [
@@ -40673,7 +40675,7 @@ Its answer was understood (and confirmed aloud) as: ${r.previous.answer}`] : [],
     r.card ? `On-screen card:
 ${r.card}` : "No on-screen card.",
     ...r.cutInAfterMs !== void 0 ? [`They spoke over this question ${(r.cutInAfterMs / 1e3).toFixed(1)} s after it began.`] : [],
-    `Heard: ${normaliseHeard(r.heard)}`
+    `Heard: ${normaliseHeard(r.heard, r.question)}`
   ].join("\n\n");
 }
 function parseUnderstanding(text2) {
@@ -40758,7 +40760,7 @@ function decisionsRequest(model, r) {
       });
     }
     const input2 = [`Question: ${r.question}`, r.card ? `On-screen card:
-${r.card}` : "No on-screen card.", `Their earlier answer: ${r.review.answer}`, `Heard now: ${normaliseHeard(r.heard)}`].join("\n\n");
+${r.card}` : "No on-screen card.", `Their earlier answer: ${r.review.answer}`, `Heard now: ${normaliseHeard(r.heard, r.question)}`].join("\n\n");
     return { model, input: input2, questions: questions2 };
   }
   const questions = [
@@ -40780,18 +40782,29 @@ ${r.card}` : "No on-screen card.", `Their earlier answer: ${r.review.answer}`, `
   return { model, input: userMessage(r), questions };
 }
 var MIN_ANSWER_CONFIDENCE = 0.4;
+var MIN_ANSWER_MASS = 0.6;
+var ANSWER_KINDS = /* @__PURE__ */ new Set(["yes", "no", "choice", "free_answer"]);
+function answerMass(k) {
+  if (!k?.probabilities?.length) return void 0;
+  return k.probabilities.reduce((sum, p) => typeof p.value === "string" && ANSWER_KINDS.has(p.value) ? sum + p.probability : sum, 0);
+}
+var HEDGE = /แต่|แค่|ยกเว้น|เว้นแต่|นอกจาก|\bbut\b|\bexcept\b/i;
 function readDecisions(answers, r, minConfidence = MIN_ANSWER_CONFIDENCE) {
   const k = answers.find((a) => a.name === "kind" && a.type === "choice");
   const kind = k?.choice;
   if (typeof kind !== "string") return void 0;
-  if (r.review) return readReview(kind, answers, r, typeof k?.confidence === "number" && k.confidence < minConfidence);
-  const unsure = typeof k?.confidence === "number" && k.confidence < minConfidence && !YES_NO_START.test(r.heard.trim());
-  if (unsure && (kind === "yes" || kind === "no" || kind === "choice" || kind === "free_answer")) return { kind: "unclear", answer: "", echo: "" };
+  const heard = normaliseHeard(r.heard, r.question);
+  const mass = answerMass(k);
+  const lowConfidence = typeof k?.confidence === "number" && k.confidence < minConfidence && !(mass !== void 0 && mass >= MIN_ANSWER_MASS);
+  if (r.review) return readReview(kind, answers, r, lowConfidence);
+  const unsure = lowConfidence && !YES_NO_START.test(heard);
+  if (unsure && ANSWER_KINDS.has(kind)) return { kind: "unclear", answer: "", echo: "" };
   const which = answers.find((a) => a.name === "which" && a.type === "choice")?.choice;
   const picked = typeof which === "string" && which !== "none" ? cardChoices(r.card, r.questionNo).find((c) => c.value === which) : void 0;
   const n = picked ? Number(picked.value) : void 0;
   switch (kind) {
     case "yes":
+      if (HEDGE.test(heard)) return { kind: "answer", answer: `yes, with a condition: ${r.heard.trim()}`, echo: "" };
       return { kind: "answer", answer: picked ? `yes (${picked.value}. ${picked.description})` : "yes", echo: ECHO.yes };
     case "no":
       return { kind: "answer", answer: "no", echo: ECHO.no };
@@ -40811,7 +40824,7 @@ function readDecisions(answers, r, minConfidence = MIN_ANSWER_CONFIDENCE) {
       return void 0;
   }
 }
-var YES_NO_START = /^(ใช่|ไม่ใช่|ได้|ไม่ได้|โอเค|ok|okay|ไม่|เอา|ไม่เอา|ถูก|ไม่ถูก|yes|no)(?![ก-๙])|^(ใช่|ไม่ใช่|ได้|ไม่ได้|ไม่|ถูก)(ค่ะ|คะ|ครับ|ๆ|นะ)/i;
+var YES_NO_START = /^(?:บอกว่า|คิดว่า|ก็)?\s*(?:ไม่ใช่|ใช้ไม่ได้|ไม่ได้|ไม่เอา|ไม่ถูก|ใช้ได้|ใช่ได้|ได้เลย|ใช่|ได้|โอเค|ok|okay|ไม่|เอา|ถูก|yes|no)(?=$|[^ก-๙]|ค่ะ|คะ|ครับ|ๆ|นะ|แต่|แค่|เลย)/i;
 var BACK = /เมื่อกี้|เมื่อกี๊|ข้อที่แล้ว|ข้อก่อน|ข้อเมื่อกี้|ฟังผิด|ได้ยินผิด|ย้อนกลับ|ย้อนไป|กลับไปข้อ|แก้ข้อ|แก้คำตอบ|เปลี่ยนคำตอบ|previous|go back/i;
 var EARLY_CUT_IN_MS = 1500;
 function refineUnderstanding(u, r) {
@@ -40867,6 +40880,8 @@ function reviewByWords(heard) {
 }
 function spokenAnswer(u, heard) {
   if (!u || u.kind !== "answer") return heard;
+  const hedged = /^yes, with a condition: (.+)$/s.exec(u.answer);
+  if (hedged) return hedged[1];
   if (/^yes\b/.test(u.answer)) return "\u0E43\u0E0A\u0E48";
   if (/^no\b/.test(u.answer)) return "\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48";
   const m = /^(\d{1,2})\.\s*(.*)$/.exec(u.answer);

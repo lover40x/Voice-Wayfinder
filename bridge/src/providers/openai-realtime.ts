@@ -1,7 +1,7 @@
 import WebSocket from 'ws'
 
 import type { OpenAIConfig } from '../config.ts'
-import { decisionsRequest, INSTRUCTIONS, parseUnderstanding, readDecisions, SCHEMA, userMessage, type Understanding, type UnderstandRequest } from '../understand.ts'
+import { decisionsRequest, INSTRUCTIONS, parseUnderstanding, readDecisions, SCHEMA, userMessage, type DecisionAnswer, type Understanding, type UnderstandRequest } from '../understand.ts'
 import type { ProviderEvent, SpeechStatus, VoiceProvider } from '../provider.ts'
 
 const URL = 'wss://api.openai.com/v1/realtime'
@@ -169,7 +169,7 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
         signal,
       })
       if (!res.ok) return undefined
-      const body = (await res.json()) as { answers?: { type: string; name?: string | null; choice?: string | boolean; confidence?: number }[]; usage?: { input_tokens?: number; output_tokens?: number } }
+      const body = (await res.json()) as { answers?: DecisionAnswer[]; usage?: { input_tokens?: number; output_tokens?: number } }
       const tokensIn = body.usage?.input_tokens ?? 0
       const tokensOut = body.usage?.output_tokens ?? 0
       if (tokensIn || tokensOut) {
