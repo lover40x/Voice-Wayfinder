@@ -1,5 +1,5 @@
 import { isNoiseTranscript, NoiseGate, type NoiseGateOptions } from './gate.ts'
-import { ECHO, ECHO_CLIPS, refineUnderstanding, type Understanding } from './understand.ts'
+import { ECHO, ECHO_CLIPS, refineUnderstanding, reviewByWords, spokenAnswer, thaiNumber, type Understanding } from './understand.ts'
 import { randomUUID } from 'node:crypto'
 
 import {
@@ -8,6 +8,7 @@ import {
   type VoiceActivity,
   type VoiceCard,
   type VoiceControlAction,
+  type VoiceRound,
   type VoiceSessionCost,
   type VoiceStateUnchanged,
   type VoiceStateV1,
@@ -54,18 +55,33 @@ function describeTaken(a: { answer: string; understood?: Understanding }): strin
 
 const STOPPED = 'The person ended voice mode (End). Continue in text and make no more voice calls until they start voice mode again.'
 
-export type SayStatus = 'completed' | 'interrupted' | 'cancelled' | 'failed' | 'skipped' | 'ended' | 'paused' | 'resumed'
+export type SayStatus = 'completed' | 'interrupted' | 'cancelled' | 'failed' | 'skipped' | 'ended' | 'paused' | 'resumed' | 'navigated'
 /** `pausedMs`: with `resumed`, how long the person had paused. */
 export type SayResult = { status: SayStatus; spokenMs: number; detail?: string; pausedMs?: number }
 
-export type ReplyStatus = 'replied' | 'timeout' | 'skipped' | 'ended' | 'cancelled' | 'disconnected' | 'resumed'
+export type ReplyStatus = 'replied' | 'timeout' | 'skipped' | 'ended' | 'cancelled' | 'disconnected' | 'resumed' | 'navigated'
 export type ReplyResult = { status: ReplyStatus; text: string; parts: string[]; typed?: boolean; pausedMs?: number }
 
 /** `repeats`: how many times the person asked to hear the question again. */
-/** `understood`: how the reply reads against the question, when it was checked (understand.ts). */
-export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult; repeats: number; understood?: Understanding }
+/**
+ * `understood`: how the reply reads against the question, when it was checked (understand.ts).
+ * `revisit`: instead of answering, the person clicked a question of the last round in the pane.
+ */
+export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult; repeats: number; understood?: Understanding; revisit?: Revisit }
 
-export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean; repeats: number; pausedMs?: number; understood?: Understanding }
+/** A question of the last round the person asked to go back to, with how it was answered. */
+export type Revisit = { number: number; question: string; answer: string }
+
+type Round = {
+  questions: readonly string[]
+  /** One entry per question; undefined until answered or skipped. */
+  answers: (InterviewAnswer | undefined)[]
+  current?: number
+  active: boolean
+}
+
+/** `changedFrom`: the person went back to this question in the pane and changed this earlier answer. */
+export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean; repeats: number; pausedMs?: number; understood?: Understanding; changedFrom?: string }
 export type InterviewResult = { heardBefore: string[]; answers: InterviewAnswer[]; unasked: string[]; ended?: string }
 
 type ActiveSpeech = {
@@ -145,6 +161,10 @@ export class VoiceSession {
   private paused = false
   /** The last answer taken and how it was understood: what a "that was wrong" refers to. */
   private lastAnswer?: { question: string; answer: string }
+  private round?: Round
+  /** A question (0-based) the person clicked while the round runs. */
+  private gotoRequested?: number
+  private revisit?: Revisit
   private pausedAt = 0
   /** How long the last pause was, while Claude still owes the person a recap of where things stand. */
   private recapDue?: number
@@ -280,10 +300,12 @@ export class VoiceSession {
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
     const { said, reply, repeats, understood } = await this.ask(text, screen ? { screen } : undefined, timeoutMs, signal, '', this.lastAnswer)
-    if (!reply) {
+    if (!reply || reply.status === 'navigated') {
       if (said.status === 'skipped') this.skipRequested = false
       const pausedMs = said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}
-      return { said, heardBefore, reply: { status: said.status === 'failed' ? 'disconnected' : (said.status as ReplyStatus), text: '', parts: [], ...pausedMs }, repeats }
+      const revisit = this.takeRevisit()
+      const status: ReplyStatus = reply?.status ?? (said.status === 'failed' ? 'disconnected' : (said.status as ReplyStatus))
+      return { said, heardBefore, reply: { status, text: '', parts: [], ...pausedMs }, repeats, ...(revisit ? { revisit } : {}) }
     }
     // Claude speaks next: confirm what was understood meanwhile, or a quick "ค่ะ".
     if (reply.status === 'replied') this.acknowledge(understood?.kind === 'answer' ? understood.echo : '')
@@ -298,44 +320,92 @@ export class VoiceSession {
     if (this.stopped) return { heardBefore: [], answers: [], unasked: [...questions], ended: STOPPED }
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
-    // One entry per question index; a correction goes back and replaces the earlier one.
-    const byIndex: (InterviewAnswer | undefined)[] = []
-    const answers = () => byIndex.filter((a): a is InterviewAnswer => a !== undefined)
+    const round: Round = { questions, answers: [], active: true }
+    this.round = round
+    this.revisit = undefined
+    this.changed()
+    const answers = () => round.answers.filter((a): a is InterviewAnswer => a !== undefined && a.status !== 'navigated')
+    const unasked = () => questions.filter((_, k) => round.answers[k] === undefined)
+    const finish = () => {
+      round.active = false
+      round.current = undefined
+      this.gotoRequested = undefined
+      this.changed()
+      return { heardBefore, answers: answers(), unasked: unasked() }
+    }
+    const card = (i: number): VoiceCard => ({ ...(screen ? { screen } : {}), question: i + 1, of: questions.length })
     // What was understood of the last answer, said just before the next question.
     let lead = ''
     let corrections = 0
-    for (let i = 0; i < questions.length; i++) {
-      const question = questions[i]!
-      const unasked = () => questions.slice(i + 1)
-      const before = i > 0 ? byIndex[i - 1] : undefined
+    /** The question answered last: what a "that was wrong" goes back to. */
+    let lastDone: number | undefined
+    /** A question the person clicked in the pane; else the first one not yet answered. */
+    let jumpTo: number | undefined
+    for (;;) {
+      // A click that came between two questions counts too.
+      const i = jumpTo ?? this.takeGoto() ?? round.answers.findIndex((a, k) => k < questions.length && a === undefined)
+      const next = i === -1 && round.answers.length < questions.length ? round.answers.length : i
+      jumpTo = undefined
+      if (next === -1 || next >= questions.length) break
+      round.current = next
+      this.changed()
+      const question = questions[next]!
+
+      // Clicked back to an answered question: read the answer back, keep or change it.
+      const earlier = round.answers[next]
+      if (earlier && earlier.status === 'replied') {
+        const review = await this.review(next, earlier, card(next), timeoutMs, signal)
+        if (review === 'navigated') {
+          jumpTo = this.takeGoto()
+          continue
+        }
+        if (review === 'keep') continue
+        if (review !== 'change') {
+          if (typeof review === 'object') {
+            round.answers[next] = review
+            lastDone = next
+            continue
+          }
+          return finish()
+        }
+        lead = ''
+      }
+
+      const before = lastDone !== undefined ? round.answers[lastDone] : undefined
       const previous = before ? { question: before.question, answer: describeTaken(before) } : this.lastAnswer
-      const { said, reply, repeats, understood } = await this.ask(question, { screen, question: i + 1, of: questions.length }, timeoutMs, signal, lead, previous)
+      const { said, reply, repeats, understood } = await this.ask(question, card(next), timeoutMs, signal, lead, previous)
       lead = ''
+      if (said.status === 'navigated' || reply?.status === 'navigated') {
+        jumpTo = this.takeGoto()
+        continue
+      }
       if (said.status === 'skipped') {
         this.skipRequested = false
-        byIndex[i] = { question, status: 'skipped', answer: '', interrupted: false, repeats }
+        round.answers[next] = { question, status: 'skipped', answer: '', interrupted: false, repeats }
         continue
       }
       if (!reply) {
         const status: ReplyStatus = said.status === 'failed' ? 'disconnected' : said.status === 'ended' ? 'ended' : said.status === 'resumed' ? 'resumed' : 'cancelled'
-        byIndex[i] = { question, status, answer: '', interrupted: false, repeats, ...(said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}) }
-        return { heardBefore, answers: answers(), unasked: unasked() }
+        round.answers[next] = { question, status, answer: '', interrupted: false, repeats, ...(said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}) }
+        return finish()
       }
       // "That was wrong": say so, drop the earlier answer and ask that question again.
-      if (understood?.kind === 'correction' && i > 0 && corrections < MAX_CORRECTIONS) {
+      if (understood?.kind === 'correction' && lastDone !== undefined && corrections < MAX_CORRECTIONS) {
         corrections++
-        this.deps.log?.timing({ what: 'correction', from: i + 1, heard: reply.text })
-        byIndex[i - 1] = undefined
+        this.deps.log?.timing({ what: 'correction', from: next + 1, to: lastDone + 1, heard: reply.text })
+        round.answers[lastDone] = undefined
         this.lastAnswer = undefined
         const clip = this.clipFor(ECHO.correction)
         if (clip) {
           this.addLine('claude', ECHO.correction)
           this.playPcm(clip, ECHO.correction)
         } else lead = ECHO.correction
-        i -= 2
+        jumpTo = lastDone
+        lastDone = undefined
         continue
       }
-      byIndex[i] = {
+      const changedFrom = earlier && earlier.status === 'replied' ? spokenAnswer(earlier.understood, earlier.answer) : undefined
+      round.answers[next] = {
         question,
         status: reply.status,
         answer: reply.text,
@@ -343,25 +413,104 @@ export class VoiceSession {
         repeats,
         ...(reply.pausedMs !== undefined ? { pausedMs: reply.pausedMs } : {}),
         ...(understood ? { understood } : {}),
+        ...(changedFrom !== undefined ? { changedFrom } : {}),
       }
+      lastDone = next
+      this.changed()
       if (reply.status === 'ended' || reply.status === 'cancelled' || reply.status === 'disconnected' || reply.status === 'resumed') {
-        return { heardBefore, answers: answers(), unasked: unasked() }
+        return finish()
       }
-      const last = i === questions.length - 1
+      const last = unasked().length === 0
       // Asked back, talked about something else, or a correction with no earlier question here: Claude takes it.
       if (understood && (understood.kind === 'question' || understood.kind === 'comment' || understood.kind === 'correction')) {
         this.acknowledge()
-        return { heardBefore, answers: answers(), unasked: unasked() }
+        return finish()
       }
       // What was understood, said back: a ready clip at once, else spoken with the next question.
       const echo = understood?.kind === 'answer' ? understood.echo : ''
       if (echo && !last && !this.clipFor(echo)) lead = echo
       else this.acknowledge(echo)
     }
-    return { heardBefore, answers: answers(), unasked: [] }
+    return finish()
   }
 
-  control(action: VoiceControlAction, text = ''): { message: string; accepted: boolean; heard?: string[]; pausedMs?: number } {
+  /**
+   * Reads an earlier answer back ("ข้อสอง ตอบไว้ว่า ใช่ ค่ะ จะเปลี่ยนไหมคะ") and
+   * hears whether to keep it, change it (the question is asked again), or
+   * a new answer straight away (returned as the new entry).
+   */
+  private async review(
+    i: number,
+    earlier: InterviewAnswer,
+    card: VoiceCard,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<'keep' | 'change' | 'navigated' | 'stop' | InterviewAnswer> {
+    const was = spokenAnswer(earlier.understood, earlier.answer)
+    let said = await this.say(`ข้อ${thaiNumber(i + 1)} ตอบไว้ว่า ${was} ค่ะ จะเปลี่ยนไหมคะ`, signal, card)
+    let unclear = 0
+    for (;;) {
+      if (said.status === 'navigated') return 'navigated'
+      if (said.status !== 'completed' && said.status !== 'interrupted') return 'stop'
+      const reply = await this.collectReply(timeoutMs, signal)
+      if (reply.status === 'navigated') return 'navigated'
+      if (reply.status === 'skipped') {
+        this.skipRequested = false
+        return 'keep'
+      }
+      if (reply.status !== 'replied') return reply.status === 'timeout' ? 'keep' : 'stop'
+      const provider = this.provider
+      const request = { question: earlier.question, heard: reply.text, review: { answer: was }, ...(card.screen ? { card: card.screen } : {}), questionNo: i + 1 }
+      const read = reply.typed || !provider?.understand ? undefined : await provider.understand(request, signal)
+      const u = read && read.kind !== 'unclear' ? read : (reviewByWords(reply.text) ?? read)
+      this.deps.log?.timing({ what: 'review', question: i + 1, heard: reply.text, kind: u?.kind ?? 'none' })
+      if (u?.kind === 'keep') {
+        this.acknowledge(ECHO.keep)
+        return 'keep'
+      }
+      if (u?.kind === 'change') {
+        const clip = this.clipFor(ECHO.change)
+        if (clip) {
+          this.addLine('claude', ECHO.change)
+          this.playPcm(clip, ECHO.change)
+        }
+        return 'change'
+      }
+      if (u?.kind === 'answer') {
+        this.acknowledge(u.echo)
+        return { question: earlier.question, status: 'replied', answer: reply.text, interrupted: false, repeats: 0, understood: u, changedFrom: was }
+      }
+      // Unclear, or a question back: ask once more by clip, then keep what was there.
+      if (++unclear > MAX_UNCLEAR) {
+        this.acknowledge(ECHO.keep)
+        return 'keep'
+      }
+      this.markLine(this.lastUserLineId(), { unclear: true })
+      const clip = this.clipFor(ECHO.unclear)
+      if (clip) {
+        this.addLine('claude', ECHO.unclear)
+        this.playPcm(clip, ECHO.unclear)
+        said = { status: 'completed', spokenMs: 0 }
+      } else said = await this.say(`${ECHO.unclear} จะเปลี่ยนคำตอบข้อ${thaiNumber(i + 1)}ไหมคะ`, signal, card)
+    }
+  }
+
+  private takeGoto(): number | undefined {
+    const n = this.gotoRequested
+    this.gotoRequested = undefined
+    return n
+  }
+
+  private takeRevisit(): Revisit | undefined {
+    const r = this.revisit
+    if (r) {
+      this.revisit = undefined
+      this.changed()
+    }
+    return r
+  }
+
+  control(action: VoiceControlAction, text = '', question?: number): { message: string; accepted: boolean; heard?: string[]; pausedMs?: number; revisit?: Revisit } {
     const done = (message: string, accepted = true) => ({ message, accepted })
     switch (action) {
       case 'mute':
@@ -430,12 +579,30 @@ export class VoiceSession {
             `Today ${usd(t.todayCostUsd ?? 0)}, this month ${usd(t.monthCostUsd ?? 0)}.`,
         )
       }
+      case 'goto': {
+        const round = this.round
+        const i = (question ?? 0) - 1
+        if (!round || i < 0 || i >= round.questions.length) return done('No such question in the round.', false)
+        if (round.active) {
+          if (round.current === i && !this.speech && !this.awaiting) return done('Already on that question.', false)
+          this.gotoRequested = i
+          if (this.speech) this.stopSpeech('navigated')
+          this.touch()
+          return done(`Going to question ${i + 1}.`)
+        }
+        // The round is over: Claude asks it again; tell it which, and what was answered.
+        const a = round.answers[i]
+        this.revisit = { number: i + 1, question: round.questions[i]!, answer: a && a.status === 'replied' ? spokenAnswer(a.understood, a.answer) : '' }
+        this.touch()
+        return done(`Question ${i + 1} goes to Claude to revisit.`)
+      }
       case 'take': {
         const heard = this.takeHeard()
         // A recap owed after a long pause goes to a waiting voice call if there is one.
         const pausedMs = this.calls === 0 ? this.takeRecap() : undefined
-        return heard.length || pausedMs !== undefined
-          ? { message: 'Took what was waiting for Claude.', accepted: true, heard, ...(pausedMs !== undefined ? { pausedMs } : {}) }
+        const revisit = this.calls === 0 ? this.takeRevisit() : undefined
+        return heard.length || pausedMs !== undefined || revisit
+          ? { message: 'Took what was waiting for Claude.', accepted: true, heard, ...(pausedMs !== undefined ? { pausedMs } : {}), ...(revisit ? { revisit } : {}) }
           : { message: 'Nothing waiting.', accepted: false, heard }
       }
       case 'type':
@@ -489,11 +656,26 @@ export class VoiceSession {
       queuedUtterances: this.queue.length,
       ...(this.stopped ? { stopped: true as const } : {}),
       ...(this.recapDue !== undefined ? { recapDueAfterMs: this.recapDue } : {}),
+      ...(this.round ? { round: this.roundState(this.round) } : {}),
+      ...(this.revisit ? { revisitDue: this.revisit.number } : {}),
       partial: [...this.partials.values()].join(' ').trim() || undefined,
       warning: this.warning,
       error: this.error,
       transcript: this.lines.slice(-40),
       card: this.card,
+    }
+  }
+
+  private roundState(r: Round): VoiceRound {
+    return {
+      items: r.questions.map((question, k) => {
+        const a = r.answers[k]
+        if (!a || a.status === 'navigated') return { question, status: 'pending' as const }
+        if (a.status === 'skipped') return { question, status: 'skipped' as const }
+        return { question, status: 'answered' as const, answer: spokenAnswer(a.understood, a.answer) }
+      }),
+      ...(r.current !== undefined ? { current: r.current } : {}),
+      active: r.active,
     }
   }
 
@@ -854,7 +1036,7 @@ export class VoiceSession {
     for (;;) {
       if (speak || !said) {
         said = await this.say(text, signal, card, repeats > 0)
-        if (said.status === 'skipped' || said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed' || said.status === 'resumed') {
+        if (said.status === 'skipped' || said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed' || said.status === 'resumed' || said.status === 'navigated') {
           return { said, repeats }
         }
       }
@@ -980,6 +1162,8 @@ export class VoiceSession {
           await new Promise(r => setTimeout(r, this.tickMs))
           continue
         }
+        // A question clicked in the pane: in the round, go there; after it, Claude revisits it.
+        if (!parts.length && (this.gotoRequested !== undefined || (this.revisit && !this.round?.active))) return result('navigated')
         // Back from a long pause with no answer yet: Claude recaps and asks again.
         if (!parts.length && this.recapDue !== undefined) {
           const pausedMs = this.takeRecap()!

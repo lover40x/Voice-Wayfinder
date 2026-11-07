@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, McpToolResult, Register } from 'claude-code'
 
-import type { BridgeLink, TranscriptLine, VoiceActivity, VoiceControlAction, VoiceStateUnchanged, VoiceStateV1 } from '../types'
+import type { BridgeLink, RoundItem, TranscriptLine, VoiceActivity, VoiceControlAction, VoiceStateUnchanged, VoiceStateV1 } from '../types'
 
 const PANE = 'voice-pane'
 const TITLE = 'Voice'
@@ -152,11 +152,20 @@ async function poll($: EngineInterface, force = false) {
   }
 }
 
-async function control($: EngineInterface, action: VoiceControlAction) {
+async function control($: EngineInterface, action: VoiceControlAction, question?: number) {
   const name = await connect($)
   if (!name) return
-  await $.mcp.call(name, 'voice_control', { action })
+  await $.mcp.call(name, 'voice_control', question === undefined ? { action } : { action, question })
   await poll($, true)
+}
+
+const ROUND_GLYPH: Record<RoundItem['status'] | 'current', string> = { current: '▶', answered: '✓', skipped: '⤼', pending: '○' }
+
+/** One question's button label: its status, number, the question cut short, and the answer taken. */
+function roundLabel(item: RoundItem, n: number, isCurrent: boolean): string {
+  const q = item.question.length > 38 ? `${item.question.slice(0, 37)}…` : item.question
+  const a = item.answer ? ` → ${item.answer.length > 24 ? `${item.answer.slice(0, 23)}…` : item.answer}` : ''
+  return `${ROUND_GLYPH[isCurrent ? 'current' : item.status]} ${n}. ${q}${a}`
 }
 
 /** The line under the prompt: voice state and cost now, or what the last session cost. */
@@ -184,7 +193,9 @@ async function deliverTyped($: EngineInterface, text: string): Promise<boolean> 
  * Takes what the person said while no question waited; empty when nothing is
  * finished and waiting, or another take is in flight.
  */
-type Waiting = { heard: string[]; pausedMs?: number }
+type Revisit = { number: number; question: string; answer: string }
+
+type Waiting = { heard: string[]; pausedMs?: number; revisit?: Revisit }
 
 const NOTHING: Waiting = { heard: [] }
 
@@ -195,12 +206,13 @@ async function takeHeard($: EngineInterface): Promise<Waiting> {
     const name = await connect($)
     if (!name) return NOTHING
     const result = await $.mcp.call(name, 'voice_control', { action: 'take' })
-    const s = result.structuredContent as { heard?: unknown; pausedMs?: unknown } | undefined
+    const s = result.structuredContent as { heard?: unknown; pausedMs?: unknown; revisit?: Revisit } | undefined
     if (result.isError || !s || !Array.isArray(s.heard)) return NOTHING
     const heard = s.heard.filter((t): t is string => typeof t === 'string' && t.trim() !== '')
     const pausedMs = typeof s.pausedMs === 'number' ? s.pausedMs : undefined
-    if (heard.length || pausedMs !== undefined) await poll($, true)
-    return pausedMs === undefined ? { heard } : { heard, pausedMs }
+    const revisit = s.revisit && typeof s.revisit.number === 'number' ? s.revisit : undefined
+    if (heard.length || pausedMs !== undefined || revisit) await poll($, true)
+    return { heard, ...(pausedMs !== undefined ? { pausedMs } : {}), ...(revisit ? { revisit } : {}) }
   } catch {
     return NOTHING
   } finally {
@@ -208,7 +220,7 @@ async function takeHeard($: EngineInterface): Promise<Waiting> {
   }
 }
 
-const hasAny = (w: Waiting) => w.heard.length > 0 || w.pausedMs !== undefined
+const hasAny = (w: Waiting) => w.heard.length > 0 || w.pausedMs !== undefined || w.revisit !== undefined
 
 function minutesSaid(ms: number): string {
   return ms < 90_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`
@@ -217,7 +229,7 @@ function minutesSaid(ms: number): string {
 /** Something the person said is finished and waiting, with no question to take it. */
 function hasWaiting(s: VoiceStateV1 | null): s is VoiceStateV1 {
   if (s === null || !LIVE.has(s.activity) || s.activity === 'paused') return false
-  if (s.recapDueAfterMs !== undefined) return true
+  if (s.recapDueAfterMs !== undefined || s.revisitDue !== undefined) return true
   return s.activity !== 'hearing' && !s.awaitingReply && !s.partial && s.queuedUtterances > 0
 }
 
@@ -228,6 +240,13 @@ function spokenNote(w: Waiting): string {
     notes.push(
       `The person paused voice for ${minutesSaid(w.pausedMs)} (someone came to talk to them) and just resumed. ` +
         'Give them a short spoken recap now with voice_say, one or two sentences: where things stand and what you are doing.',
+    )
+  }
+  if (w.revisit) {
+    const v = w.revisit
+    notes.push(
+      `The person clicked question ${v.number} of the last round in the voice pane to revisit it ("${v.question}"${v.answer ? `; they had answered: ${v.answer}` : '; not answered'}). ` +
+        'Read their answer back by voice, ask whether they want to keep or change it (voice_converse), and update your notes and the tracker if it changes.',
     )
   }
   if (w.heard.length) {
@@ -243,7 +262,10 @@ function spokenNote(w: Waiting): string {
 /** What starts a turn when Claude is idle: the person's words, as theirs. */
 function idlePrompt(w: Waiting): string {
   const recap = w.pausedMs !== undefined ? `(กลับมาแล้ว หลัง pause ไป ${minutesSaid(w.pausedMs)}) ช่วยสรุปสั้นๆ ว่าเราถึงไหนแล้ว` : ''
-  return `🎙 ${[recap, w.heard.join(' ')].filter(Boolean).join(' ')}`
+  const revisit = w.revisit
+    ? `ขอกลับไปทบทวนข้อ ${w.revisit.number} "${w.revisit.question}"${w.revisit.answer ? ` (เดิมตอบว่า ${w.revisit.answer})` : ''} อ่านคำตอบเดิมให้ฟังแล้วถามว่าจะเปลี่ยนไหม`
+    : ''
+  return `🎙 ${[recap, revisit, w.heard.join(' ')].filter(Boolean).join(' ')}`
 }
 
 /** With Claude idle, what the person said starts a turn, as their own words. */
@@ -480,6 +502,20 @@ export const register: Register = on => {
             <Button key="end" onPress={() => void control($, 'end')}>
               ⏹ End
             </Button>
+          </Box>
+        )}
+
+        {live && s.round && (
+          <Box key="round" flexDirection="column">
+            <Text bold>
+              Questions <Text dimColor>{s.round.active ? '· click one to go to it' : '· click one to go back to it'}</Text>
+            </Text>
+            {s.round.items.map((item, k) => (
+              <Button key={`q-${k + 1}`} onPress={() => void control($, 'goto', k + 1)}>
+                {roundLabel(item, k + 1, s.round?.active === true && s.round.current === k)}
+              </Button>
+            ))}
+            {s.revisitDue !== undefined && <Text dimColor>Question {s.revisitDue} goes to Claude to revisit next.</Text>}
           </Box>
         )}
 

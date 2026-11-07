@@ -124,6 +124,8 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
     if (!u?.enabled) return undefined
     const timeout = AbortSignal.timeout(u.timeoutMs)
     if ((u.api ?? 'decisions') === 'decisions') return this.decide(request, signal ? AbortSignal.any([signal, timeout]) : timeout)
+    // The JSON prompt reads answers, not keep-or-change: the bridge reads those from plain words.
+    if (request.review) return undefined
     try {
       const res = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',

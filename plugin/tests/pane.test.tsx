@@ -88,9 +88,18 @@ function bridge(on: On, state: VoiceStateV1, calls: Call[], acceptsTyped = true,
 function take(state: VoiceStateV1) {
   const heard = state.queuedUtterances ? state.transcript.filter(l => l.who === 'user').slice(-state.queuedUtterances).map(l => l.text) : []
   const pausedMs = state.recapDueAfterMs
+  const n = state.revisitDue
+  const revisit = n !== undefined ? { number: n, question: state.round?.items[n - 1]?.question ?? '', answer: state.round?.items[n - 1]?.answer ?? '' } : undefined
   state.queuedUtterances = 0
   delete state.recapDueAfterMs
-  return { message: 'took', accepted: heard.length > 0 || pausedMs !== undefined, heard, ...(pausedMs !== undefined ? { pausedMs } : {}) }
+  delete state.revisitDue
+  return {
+    message: 'took',
+    accepted: heard.length > 0 || pausedMs !== undefined || revisit !== undefined,
+    heard,
+    ...(pausedMs !== undefined ? { pausedMs } : {}),
+    ...(revisit ? { revisit } : {}),
+  }
 }
 
 const typedPrompt = (text: string) => ({ text, wait: false, origin: { kind: 'sdk' } }) as const
@@ -356,4 +365,39 @@ test('back from a long pause with Claude idle, a turn starts asking where things
   await $.command.run(OPEN_PANE)
   await clock.settle()
   expect(prompts).toEqual(['🎙 (กลับมาแล้ว หลัง pause ไป 3 min) ช่วยสรุปสั้นๆ ว่าเราถึงไหนแล้ว'])
+})
+
+const ROUND: VoiceStateV1['round'] = {
+  items: [
+    { question: 'ข้อหนึ่ง ใช้ GitHub Issues ไหมคะ', status: 'answered', answer: 'ใช่' },
+    { question: 'ข้อสอง ใครได้รับแจ้งเตือนคะ', status: 'pending' },
+    { question: 'ข้อสาม เก็บกี่วันคะ', status: 'skipped' },
+  ],
+  current: 1,
+  active: true,
+}
+
+test('the pane lists the round with each question\'s state, and a click goes to that question', async ($, on) => {
+  const calls: Call[] = []
+  bridge(on, { ...STATE, round: ROUND }, calls)
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'q-1' }))?.text).toBe('✓ 1. ข้อหนึ่ง ใช้ GitHub Issues ไหมคะ → ใช่')
+  expect((await ui.find({ key: 'q-2' }))?.text).toBe('▶ 2. ข้อสอง ใครได้รับแจ้งเตือนคะ')
+  expect((await ui.find({ key: 'q-3' }))?.text).toBe('⤼ 3. ข้อสาม เก็บกี่วันคะ')
+  expect(await ui.find({ type: 'Text', text: /click one to go to it/ })).toBeDefined()
+  await ui.press({ key: 'q-1' })
+  expect(calls.filter(c => c.tool === 'voice_control').map(c => c.args)).toEqual([{ action: 'goto', question: 1 }])
+  await ui.unmount()
+})
+
+test('after the round, a question clicked to revisit reaches Claude beside its next tool result', async ($, on) => {
+  const prompts: string[] = []
+  bridge(on, { ...WORKING(), queuedUtterances: 0, round: { ...ROUND, active: false, current: undefined }, revisitDue: 1 }, [], true, [], prompts)
+  await $.turn.start({ text: 'write the ticket', turnId: 't1' })
+  await $.command.run(OPEN_PANE)
+  const r = await $.tool.call({ tool: 'Bash', command: 'gh issue view 13' })
+  expect(r.context?.join('\n')).toContain('clicked question 1 of the last round')
+  expect(r.context?.join('\n')).toContain('they had answered: ใช่')
+  expect(prompts).toEqual([])
 })

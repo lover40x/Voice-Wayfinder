@@ -4,7 +4,8 @@
 // Claude still makes every decision; this only keeps a round from moving on
 // over a cough, a flush, or a misheard word.
 
-export type UnderstandingKind = 'answer' | 'unclear' | 'repeat' | 'question' | 'comment' | 'correction'
+/** `keep` and `change` answer a read-back of an earlier answer (`review`). */
+export type UnderstandingKind = 'answer' | 'unclear' | 'repeat' | 'question' | 'comment' | 'correction' | 'keep' | 'change'
 
 export type Understanding = {
   kind: UnderstandingKind
@@ -26,6 +27,8 @@ export type UnderstandRequest = {
   previous?: { question: string; answer: string }
   /** They spoke over this question this many ms into it (often a reaction to the last confirmation). */
   cutInAfterMs?: number
+  /** Reading back an earlier answer and asking whether to keep it: `question` is that question, `review.answer` the answer given. */
+  review?: { answer: string }
 }
 
 export const INSTRUCTIONS = `You check a spoken reply in a Thai voice conversation before the conversation moves on.
@@ -103,10 +106,14 @@ export const ECHO = {
   unclear: 'ขอโทษค่ะ ได้ยินไม่ชัด พูดอีกทีได้ไหมคะ',
   /** They say the last answer was misheard: the round goes back to it. */
   correction: 'เมื่อกี้น่าจะฟังผิดค่ะ งั้นเรากลับไปข้อก่อนหน้าอีกครั้งนะคะ',
+  /** Read back an earlier answer, they keep it. */
+  keep: 'ได้ค่ะ คงคำตอบเดิมนะคะ',
+  /** They want to change it: the question follows. */
+  change: 'ได้ค่ะ งั้นถามใหม่นะคะ',
 } as const
 
 /** Every fixed phrase, rendered as clips when voice connects. */
-export const ECHO_CLIPS: readonly string[] = [ECHO.yes, ECHO.no, ECHO.unclear, ECHO.correction, ...Array.from({ length: 8 }, (_, i) => ECHO.choice(i + 1))]
+export const ECHO_CLIPS: readonly string[] = [ECHO.yes, ECHO.no, ECHO.unclear, ECHO.correction, ECHO.keep, ECHO.change, ...Array.from({ length: 8 }, (_, i) => ECHO.choice(i + 1))]
 
 const KINDS = [
   ['yes', 'Yes: agrees with the question exactly as it was asked (ใช่, ได้, โอเค, ถูก, เอา), even with extra words after it ("ใช่ ไม่ต้องถามใหม่"). Negative words inside the question ("โดยไม่ถาม Jev") do not flip it.'],
@@ -145,8 +152,37 @@ export function cardChoices(card: string | undefined, questionNo?: number): { va
   return out
 }
 
+const REVIEW_KINDS = [
+  ['keep', 'Keeps the earlier answer: เหมือนเดิม, ไม่เปลี่ยน, คงเดิม, อันเดิม, or "no" (ไม่, ไม่ต้อง) to "will you change it?".'],
+  ['change', 'Wants to change it without saying the new answer yet: เปลี่ยน, ขอแก้, or "yes" (ใช่, ได้, เอา) to "will you change it?".'],
+  ['new_answer', 'Gives a different answer straight away: a choice number, the other option, or new words for the question.'],
+  ['question', 'Asks something back first.'],
+  ['unclear', 'Noise, unrelated words, or too garbled to tell.'],
+] as const
+
 export function decisionsRequest(model: string, r: UnderstandRequest & { questionNo?: number }) {
   const choices = cardChoices(r.card, r.questionNo)
+  if (r.review) {
+    const questions: unknown[] = [
+      {
+        type: 'choice',
+        name: 'kind',
+        instructions:
+          'In a Thai voice conversation, the earlier answer to the question below was read back to the person, and they were asked whether they want to change it. Thai speech recognition heard their reply. What do they want?',
+        choices: REVIEW_KINDS.map(([value, description]) => ({ value, description })),
+      },
+    ]
+    if (choices.length >= 2) {
+      questions.push({
+        type: 'choice',
+        name: 'which',
+        instructions: 'If they give a new answer that is one of the numbered choices on the card, which is it?',
+        choices: [...choices, { value: 'none', description: 'None of them.' }],
+      })
+    }
+    const input = [`Question: ${r.question}`, r.card ? `On-screen card:\n${r.card}` : 'No on-screen card.', `Their earlier answer: ${r.review.answer}`, `Heard now: ${normaliseHeard(r.heard)}`].join('\n\n')
+    return { model, input, questions }
+  }
   const questions: unknown[] = [
     {
       type: 'choice',
@@ -185,6 +221,7 @@ export function readDecisions(
   const k = answers.find(a => a.name === 'kind' && a.type === 'choice')
   const kind = k?.choice
   if (typeof kind !== 'string') return undefined
+  if (r.review) return readReview(kind, answers, r, typeof k?.confidence === 'number' && k.confidence < minConfidence)
   // Noise reads as a low-confidence answer; a reply that opens with a plain yes or no is kept.
   const unsure = typeof k?.confidence === 'number' && k.confidence < minConfidence && !YES_NO_START.test(r.heard.trim())
   if (unsure && (kind === 'yes' || kind === 'no' || kind === 'choice' || kind === 'free_answer')) return { kind: 'unclear', answer: '', echo: '' }
@@ -237,4 +274,72 @@ export function refineUnderstanding(u: Understanding | undefined, r: UnderstandR
     if (u.kind === 'answer' && /^yes\b/.test(u.answer)) return { kind: 'repeat', answer: '', echo: '' }
   }
   return u
+}
+
+/** A reply to "you answered X: change it?". A new answer goes back as an ordinary answer. */
+function readReview(kind: string, answers: readonly DecisionAnswer[], r: UnderstandRequest & { questionNo?: number }, unsure: boolean): Understanding | undefined {
+  const which = answers.find(a => a.name === 'which' && a.type === 'choice')?.choice
+  const picked = typeof which === 'string' && which !== 'none' ? cardChoices(r.card, r.questionNo).find(c => c.value === which) : undefined
+  // "เอาข้อสองแทน": a change that already names the new choice is that answer.
+  const named = choiceNumber(r.heard)
+  const newChoice = picked ?? (named !== undefined ? cardChoices(r.card, r.questionNo).find(c => Number(c.value) === named) : undefined)
+  switch (kind) {
+    case 'keep':
+      return { kind, answer: '', echo: '' }
+    case 'change':
+      return newChoice && (named !== undefined || CHOICE_WORDS.test(r.heard))
+        ? { kind: 'answer', answer: `${newChoice.value}. ${newChoice.description}`, echo: ECHO.choice(Number(newChoice.value)) }
+        : { kind, answer: '', echo: '' }
+    case 'new_answer': {
+      if (picked) return { kind: 'answer', answer: `${picked.value}. ${picked.description}`, echo: ECHO.choice(Number(picked.value)) }
+      // Noise reads as an unsure new answer: ask again.
+      if (unsure && !YES_NO_START.test(r.heard.trim()) && !/เปลี่ยน|แทน/.test(r.heard)) return { kind: 'unclear', answer: '', echo: '' }
+      return { kind: 'answer', answer: r.heard, echo: '' }
+    }
+    case 'question':
+      return { kind: 'question', answer: r.heard, echo: '' }
+    case 'unclear':
+      return { kind: 'unclear', answer: '', echo: '' }
+    default:
+      return undefined
+  }
+}
+
+/** Words that name a choice ("ข้อสอง", "อันแรก", "2"). */
+const CHOICE_WORDS = /ข้อ\s*(หนึ่ง|สอง|สาม|สี่|ห้า|หก|เจ็ด|แปด|แรก|\d)|อัน(แรก|ที่)|\d/
+
+/** The choice number a reply names ("ข้อสอง", "อันแรก", "ข้อ 3"), if any. */
+export function choiceNumber(heard: string): number | undefined {
+  const m = /ข้อ\s*(หนึ่ง|สอง|สาม|สี่|ห้า|หก|เจ็ด|แปด|เก้า|สิบ|แรก|\d{1,2})|อัน(แรก)/.exec(heard)
+  if (!m) return undefined
+  const w = m[1] ?? m[2]!
+  if (w === 'แรก') return 1
+  if (/^\d+$/.test(w)) return Number(w)
+  const n = THAI_NUMBERS.indexOf(w)
+  return n > 0 ? n : undefined
+}
+
+const KEEP = /เหมือนเดิม|ไม่เปลี่ยน|คงเดิม|อันเดิม|ตามเดิม|^ไม่(ต้อง)?(ค่ะ|ครับ)?$|\bkeep\b|\bsame\b/i
+const CHANGE = /เปลี่ยน|ขอแก้|^แก้|^(ใช่|ได้|เอา)(ค่ะ|ครับ)?$|\bchange\b/i
+
+/** Without a model (typed, or the check failed): keep or change from plain words, else undefined. */
+export function reviewByWords(heard: string): Understanding | undefined {
+  const t = heard.trim()
+  if (KEEP.test(t)) return { kind: 'keep', answer: '', echo: '' }
+  if (CHANGE.test(t)) return { kind: 'change', answer: '', echo: '' }
+  return undefined
+}
+
+/** How an earlier answer is read back aloud: "ใช่", "ไม่ใช่", "ข้อสอง Linear", or their words. */
+export function spokenAnswer(u: Understanding | undefined, heard: string): string {
+  if (!u || u.kind !== 'answer') return heard
+  if (/^yes\b/.test(u.answer)) return 'ใช่'
+  if (/^no\b/.test(u.answer)) return 'ไม่ใช่'
+  const m = /^(\d{1,2})\.\s*(.*)$/.exec(u.answer)
+  if (m) return `ข้อ${THAI_NUMBERS[Number(m[1])] ?? m[1]} ${m[2]}`
+  return u.answer || heard
+}
+
+export function thaiNumber(n: number): string {
+  return THAI_NUMBERS[n] ?? String(n)
 }

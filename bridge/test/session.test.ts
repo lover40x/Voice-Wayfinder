@@ -959,3 +959,137 @@ test('a reply that opens with a plain yes or no is kept even when the model is u
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.12 }], { ...req, heard: 'แม่จ๋า มากจัง' })?.kind, 'unclear')
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.2 }], { ...req, heard: 'ได้ยินไม่ชัด' })?.kind, 'unclear')
 })
+
+/** Reads review replies (keep / change) and answers the way Luna did live. */
+const reads = (r: UnderstandRequest): Understanding | undefined => {
+  if (r.review) return r.heard === 'เหมือนเดิม' ? { kind: 'keep', answer: '', echo: '' } : r.heard === 'เปลี่ยน' ? { kind: 'change', answer: '', echo: '' } : undefined
+  if (r.heard === 'ใช่') return { kind: 'answer', answer: 'yes', echo: 'ใช่ค่ะ' }
+  if (r.heard === 'ไม่ใช่') return { kind: 'answer', answer: 'no', echo: 'ไม่ใช่นะคะ' }
+  return { kind: 'answer', answer: r.heard, echo: '' }
+}
+
+/** Waits (up to 2 s) until `ok` holds: the round runs on real timers. */
+async function until(ok: () => boolean) {
+  for (let n = 0; n < 200 && !ok(); n++) await tick(10)
+  assert.ok(ok(), 'timed out waiting')
+}
+
+/** Speaks the newest speech through, then the person says `text`. */
+async function hearNext(provider: FakeProvider, audio: FakeAudio, text: string) {
+  await tick(20)
+  speakThrough(provider, audio, `s${provider.said.length}`)
+  await tick(10)
+  provider.utter(text, `${text}-${provider.said.length}`)
+  await tick(30)
+}
+
+test('clicking a later question jumps to it, then the round comes back to the first one not answered', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = reads
+  const round = session.interview(['ข้อหนึ่ง', 'ข้อสอง', 'ข้อสาม'], 5000)
+  await tick(20)
+  speakThrough(provider, audio, 's1')
+  await tick(10)
+  assert.equal(session.control('goto', '', 3).accepted, true)
+  await hearNext(provider, audio, 'ตอบสาม')
+  await hearNext(provider, audio, 'ตอบหนึ่ง')
+  await hearNext(provider, audio, 'ตอบสอง')
+  const r = await round
+  assert.deepEqual(provider.said, ['ข้อหนึ่ง', 'ข้อสาม', 'ข้อหนึ่ง', 'ข้อสอง'])
+  // Answers come back in question order.
+  assert.deepEqual(r.answers.map(a => a.answer), ['ตอบหนึ่ง', 'ตอบสอง', 'ตอบสาม'])
+  assert.deepEqual(r.unasked, [])
+})
+
+test('clicking an answered question reads the answer back; keeping it carries on where the round was', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = reads
+  const round = session.interview(['ข้อหนึ่ง', 'ข้อสอง'], 5000)
+  await hearNext(provider, audio, 'ใช่')
+  await until(() => provider.said.length === 2)
+  session.control('goto', '', 1)
+  await until(() => provider.said.length === 3)
+  assert.equal(provider.said.at(-1), 'ข้อหนึ่ง ตอบไว้ว่า ใช่ ค่ะ จะเปลี่ยนไหมคะ')
+  const s = session.state() as VoiceStateV1
+  assert.deepEqual(s.round?.items.map(i => [i.status, i.answer]), [['answered', 'ใช่'], ['pending', undefined]])
+  assert.equal(s.round?.current, 0)
+  await hearNext(provider, audio, 'เหมือนเดิม')
+  await hearNext(provider, audio, 'ไม่ใช่')
+  const r = await round
+  // No ready clips here, so confirmations are spoken: with the next question, or on their own.
+  assert.deepEqual(provider.said, ['ข้อหนึ่ง', 'ใช่ค่ะ ข้อสอง', 'ข้อหนึ่ง ตอบไว้ว่า ใช่ ค่ะ จะเปลี่ยนไหมคะ', 'ได้ค่ะ คงคำตอบเดิมนะคะ', 'ข้อสอง'])
+  assert.deepEqual(r.answers.map(a => [a.understood?.answer, a.changedFrom]), [['yes', undefined], ['no', undefined]])
+})
+
+test('changing an earlier answer asks that question again and notes what it was', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = reads
+  const round = session.interview(['ข้อหนึ่ง', 'ข้อสอง'], 5000)
+  await hearNext(provider, audio, 'ใช่')
+  await hearNext(provider, audio, 'ใช่')
+  // Round done for the bridge? No: wait until it returns, then it is the last round.
+  const first = await round
+  assert.equal(first.answers.length, 2)
+  const round2 = session.interview(['ข้อหนึ่ง', 'ข้อสอง'], 5000)
+  await hearNext(provider, audio, 'ใช่')
+  await until(() => provider.said.at(-1) === 'ใช่ค่ะ ข้อสอง' && provider.said.length === 5)
+  session.control('goto', '', 1)
+  await hearNext(provider, audio, 'เปลี่ยน')
+  await hearNext(provider, audio, 'ไม่ใช่')
+  await hearNext(provider, audio, 'ใช่')
+  const r = await round2
+  assert.equal(r.answers[0]!.understood?.answer, 'no')
+  assert.equal(r.answers[0]!.changedFrom, 'ใช่')
+  assert.equal(r.answers[1]!.understood?.answer, 'yes')
+})
+
+test('after the round, clicking a question goes to Claude to revisit, even while it waits on another question', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = reads
+  const round = session.interview(['ข้อหนึ่ง', 'ข้อสอง'], 5000)
+  await hearNext(provider, audio, 'ใช่')
+  await hearNext(provider, audio, 'ไม่ใช่')
+  await round
+  assert.equal((session.state() as VoiceStateV1).round?.active, false)
+  // Claude is asking something else when the person clicks question 1.
+  const turn = session.converse('อีกเรื่องค่ะ', 5000)
+  await tick(20)
+  speakThrough(provider, audio, `s${provider.said.length}`)
+  await tick(10)
+  assert.equal(session.control('goto', '', 1).accepted, true)
+  const r = await turn
+  assert.equal(r.reply.status, 'navigated')
+  assert.deepEqual(r.revisit, { number: 1, question: 'ข้อหนึ่ง', answer: 'ใช่' })
+  // Handed over once.
+  assert.equal(session.control('take').revisit, undefined)
+})
+
+test('with no voice call waiting, the pane takes a revisit for Claude', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = reads
+  const round = session.interview(['ข้อหนึ่ง'], 5000)
+  await hearNext(provider, audio, 'ใช่')
+  await round
+  // The spoken "ใช่ค่ะ" finishes; then no voice call is in progress.
+  await tick(20)
+  speakThrough(provider, audio, `s${provider.said.length}`)
+  await tick(20)
+  session.control('goto', '', 1)
+  assert.equal((session.state() as VoiceStateV1).revisitDue, 1)
+  assert.deepEqual(session.control('take').revisit, { number: 1, question: 'ข้อหนึ่ง', answer: 'ใช่' })
+  assert.equal((session.state() as VoiceStateV1).revisitDue, undefined)
+})
+
+test('a read-back reply is understood with words when there is no model', async () => {
+  const { reviewByWords, choiceNumber, spokenAnswer } = await import('../src/understand.ts')
+  assert.equal(reviewByWords('เหมือนเดิมค่ะ')?.kind, 'keep')
+  assert.equal(reviewByWords('ไม่')?.kind, 'keep')
+  assert.equal(reviewByWords('เปลี่ยน')?.kind, 'change')
+  assert.equal(reviewByWords('ใช่')?.kind, 'change')
+  assert.equal(reviewByWords('กาฬสินธุ์'), undefined)
+  assert.equal(choiceNumber('เอาข้อสองแทน'), 2)
+  assert.equal(choiceNumber('อันแรก'), 1)
+  assert.equal(choiceNumber('ข้อ 3'), 3)
+  assert.equal(choiceNumber('ไม่รู้'), undefined)
+  assert.equal(spokenAnswer({ kind: 'answer', answer: '2. Linear', echo: '' }, 'ข้อสอง'), 'ข้อสอง Linear')
+})

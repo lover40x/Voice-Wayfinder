@@ -1,3 +1,4 @@
+import type { Revisit } from './session.ts'
 import type { Understanding } from './understand.ts'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -115,6 +116,10 @@ const describeUnderstood = (u?: Understanding) => {
   }
 }
 
+/** A question of the last round clicked in the pane, for Claude to go back to. */
+const describeRevisit = (v: Revisit) =>
+  `The person clicked question ${v.number} of the last round in the voice pane to revisit it ("${v.question}"${v.answer ? `; they had answered: ${v.answer}` : '; it was not answered'}). Read their answer back by voice, ask whether they want to keep or change it (voice_converse), and update your notes and the tracker if it changes.`
+
 const minutesSaid = (ms = 0) => (ms < 90_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`)
 
 const describeSay = (r: SayResult) => {
@@ -131,6 +136,8 @@ const describeSay = (r: SayResult) => {
       return 'Speech cancelled.'
     case 'paused':
       return 'Paused by the person.'
+    case 'navigated':
+      return 'The person went to another question in the voice pane.'
     case 'resumed':
       return `The person paused voice for ${minutesSaid(r.pausedMs)} (someone came to talk to them) and just resumed. First give a short spoken recap with voice_say, one or two sentences: where you are and what you were about to say or ask. Then say it or ask it again.`
     case 'failed':
@@ -154,6 +161,8 @@ const describeReply = (r: ReplyResult) => {
       return 'Listening was cancelled.'
     case 'resumed':
       return `The person paused voice for ${minutesSaid(r.pausedMs)} (someone came to talk to them) and just resumed. First give a short spoken recap with voice_say, one or two sentences: where you are and what you were about to say or ask. Then say it or ask it again.`
+    case 'navigated':
+      return 'The person went to another question in the voice pane instead of answering.'
     case 'disconnected':
       return `The voice connection dropped${r.text ? ` after hearing: ${r.text}` : ''}. The next voice call reconnects.`
   }
@@ -216,6 +225,7 @@ server.registerTool(
         if (r.said.status === 'completed' || r.said.status === 'interrupted') lines.push(describeReply(r.reply))
         const understood = describeUnderstood(r.understood)
         if (understood) lines.push(understood)
+        if (r.revisit) lines.push(describeRevisit(r.revisit) + ' Then ask this question again.')
         return text(lines.join('\n'), r)
       },
     ),
@@ -251,7 +261,8 @@ server.registerTool(
           const heard = a.status === 'replied' ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [], pausedMs: a.pausedMs })})`
           const notes = [a.interrupted && 'they cut in while it was being asked', a.repeats && `asked to hear it again, repeated ${a.repeats}×`].filter(Boolean)
           const understood = describeUnderstood(a.understood)
-          lines.push(`Q${i + 1}: ${a.question}\nA${i + 1}${notes.length ? ` (${notes.join('; ')})` : ''}: ${heard}${understood ? `\n${understood}` : ''}`)
+          const changed = a.changedFrom ? `\nThey went back to this question in the pane and changed their answer (it was: ${a.changedFrom}).` : ''
+          lines.push(`Q${i + 1}: ${a.question}\nA${i + 1}${notes.length ? ` (${notes.join('; ')})` : ''}: ${heard}${understood ? `\n${understood}` : ''}${changed}`)
         })
         if (r.unasked.length) lines.push(`Not asked: ${r.unasked.join(' | ')}`)
         lines.push('Answers are Thai speech, transcribed; English terms may be misheard.')
@@ -284,14 +295,15 @@ server.registerTool(
   {
     title: 'Voice control',
     description:
-      'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. "pause" and "resume" belong to the person (the Pause button in the voice pane): while paused, your voice calls wait. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. You never need "type" or "take".',
+      'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. "pause" and "resume" belong to the person (the Pause button in the voice pane): while paused, your voice calls wait. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. "goto" is the question list in the voice pane. You never need "type", "take" or "goto".',
     inputSchema: {
-      action: z.enum(['start', 'pause', 'resume', 'mute', 'unmute', 'skip', 'end', 'type', 'take']),
+      action: z.enum(['start', 'pause', 'resume', 'mute', 'unmute', 'skip', 'end', 'type', 'take', 'goto']),
       text: z.string().max(4000).optional().describe('With "type": what the person typed.'),
+      question: z.number().int().min(1).max(8).optional().describe('With "goto": the question of the round to go to, from 1.'),
     },
   },
-  async ({ action, text: typed }) => {
-    const r = session.control(action, typed)
+  async ({ action, text: typed, question }) => {
+    const r = session.control(action, typed, question)
     return text(r.message, r)
   },
 )

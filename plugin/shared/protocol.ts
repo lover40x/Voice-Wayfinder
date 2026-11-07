@@ -2,6 +2,7 @@
 // in types/index.d.ts (the mod's state contract); this file adds the version.
 
 export type {
+  RoundItem,
   TranscriptLine,
   VoiceActivity,
   VoiceCard,
@@ -9,6 +10,7 @@ export type {
   VoiceSessionCost,
   VoiceStateUnchanged,
   VoiceStateV1,
+  VoiceRound,
 } from '../types/index.js'
 
 export const PROTOCOL_VERSION = 1

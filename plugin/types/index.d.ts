@@ -14,6 +14,22 @@ export type VoiceActivity =
   | 'paused' // the person paused: mic off, Claude waits until Resume
   | 'error'
 
+/** One question of a `voice_interview` round, as the pane lists it. */
+export type RoundItem = {
+  question: string
+  status: 'pending' | 'answered' | 'skipped'
+  /** How the answer was understood, short ("ใช่", "ข้อสอง Linear", their words). */
+  answer?: string
+}
+
+/** The round in progress, or the last one (`active` false): the pane's clickable question list. */
+export type VoiceRound = {
+  items: RoundItem[]
+  /** Index (0-based) of the question being asked or read back. */
+  current?: number
+  active: boolean
+}
+
 /** What Claude put on screen for the question in progress: its full text and choices. */
 export type VoiceCard = {
   /** Markdown: the question, numbered choices, the recommendation. */
@@ -77,6 +93,9 @@ export type VoiceStateV1 = {
   error?: string
   transcript: TranscriptLine[]
   card?: VoiceCard
+  round?: VoiceRound
+  /** A question of the last round the person clicked to revisit, waiting for Claude (1-based). */
+  revisitDue?: number
 }
 
 /** What `voice_status` answers when the caller already holds `sinceRev`. */
@@ -86,9 +105,10 @@ export type VoiceStateUnchanged = { v: 1; rev: number; unchanged: true }
  * `type` delivers text the person typed as their answer (with `text`); `take`
  * hands over what they said while no question waited, answered with `heard`;
  * `start` turns voice mode back on after `end`; `pause` holds everything (mic, speech,
- * timeouts, Claude's next voice call) until `resume`.
+ * timeouts, Claude's next voice call) until `resume`; `goto` (with `question`, 1-based)
+ * jumps the round to that question, or asks Claude to revisit it once the round is over.
  */
-export type VoiceControlAction = 'start' | 'pause' | 'resume' | 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take'
+export type VoiceControlAction = 'start' | 'pause' | 'resume' | 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take' | 'goto'
 
 /** Whether the pane can reach the bridge's MCP server. */
 export type BridgeLink = {

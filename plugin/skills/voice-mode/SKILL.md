@@ -54,6 +54,10 @@ Both are the person's own words. Answer every one at once with `voice_say` (or `
 
 Keep the person in the loop while you work: one short `voice_say` when you start something long and when it is done, not a running commentary.
 
+## Going back
+
+The person can click any question of a round in the voice pane. During the round the bridge handles it (reads the answer back, keeps or changes it); an answer marked "changed their answer (it was: …)" replaces the earlier one in your notes. After the round, a click reaches you as a request to revisit that question (beside a tool result, as a 🎙 message, or as a `voice_converse` result with `revisit`): read their answer back, ask whether to keep or change it with `voice_converse`, and update your notes and the tracker if it changes.
+
 ## Deciding
 
 After each decision, confirm it in one spoken sentence with `voice_converse` ("สรุปว่าใช้ GitHub Issues เป็น tracker ถูกไหมคะ"), the decision also in its `screen`. Write to the tracker only after a clear yes. On a no or a correction, fix it and confirm again.
