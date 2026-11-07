@@ -2,6 +2,15 @@
 
 All notable changes to the voice-wayfinder plugin. Versions follow semantic versioning; the bridge/mod message format has its own `v` (see `plugin/types/index.d.ts`).
 
+## Unreleased
+
+- Windows support (Windows 10 and 11). A new audio helper, `plugin/native/vw-audio/main.cpp`, speaks the same framed protocol as the Swift one: WASAPI playback, and the mic through the Windows Voice Capture DSP (echo cancellation plus noise suppression) with `--voice-processing`, or raw WASAPI without it. It builds with MSVC from Visual Studio 2022 Build Tools, found through `vswhere`.
+- The bridge is now started with `node plugin/scripts/start-bridge.mjs` on both systems (plugin.json no longer runs a shell script). The launcher reads the Bitwarden token from the macOS Keychain or Windows Credential Manager, fetches only `OPENAI_REALTIME_API_KEY` with `bws secret list`, and runs the bridge in the same process, so the key still lives only in the bridge's memory and no long-running `bws` process holds it. Other secrets the machine account can read are no longer put in the bridge's environment.
+- `npm run build:audio` is a Node script (`plugin/scripts/build-audio.mjs`) for both systems; `start-bridge.sh` and `build-audio.sh` are gone.
+- `npm run setup` handles macOS and Windows: it checks for MSVC on Windows, stores the token in Credential Manager (typed without echo, twice), and checks that Bitwarden hands over the key the same way the launcher does. New `--new-token` replaces a stored token.
+- On Windows, logs and the clip cache default to `%LOCALAPPDATA%\voice-wayfinder` when Claude Code does not set `CLAUDE_PLUGIN_DATA`.
+- `npm test` quotes its glob with double quotes, so it also runs under cmd.exe.
+
 ## 0.2.0
 
 - End means end: after the pane's End button (or `voice_control end`), every voice call answers `ended` without reconnecting or speaking, until voice mode is started again (`/voice-wayfinder:voice-mode`, which calls the new `voice_control start`). Before, Claude's next voice call reconnected and spoke. The pane says voice ended and how to start it again.

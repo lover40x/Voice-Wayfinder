@@ -13,9 +13,9 @@
     "setup:check": "node scripts/setup.mjs --check",
     "build": "npm run build:bridge && npm run build:audio",
     "build:bridge": "esbuild bridge/src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=plugin/server/bridge.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
-    "build:audio": "sh plugin/scripts/build-audio.sh",
+    "build:audio": "node plugin/scripts/build-audio.mjs",
     "typecheck": "tsc -p bridge",
-    "test": "node --test 'bridge/test/*.test.ts'",
+    "test": "node --test \"bridge/test/*.test.ts\"",
     "validate": "claude plugin validate plugin && claude plugin validate .",
     "test:mod": "claude plugin test plugin",
     "check": "npm run typecheck && npm test && npm run build && npm run validate && npm run test:mod"

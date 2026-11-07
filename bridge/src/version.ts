@@ -15,7 +15,7 @@ export function compareVersions(a: string, b: string): number {
 /** Resolves a warning when the installed Claude Code is older than the plugin needs. */
 export function checkClaudeCodeVersion(): Promise<string | undefined> {
   return new Promise(resolve => {
-    execFile('claude', ['--version'], { timeout: 5000 }, (err, stdout) => {
+    execFile('claude', ['--version'], { timeout: 5000, windowsHide: true }, (err, stdout) => {
       const found = /(\d+\.\d+\.\d+)/.exec(stdout ?? '')?.[1]
       if (err || !found) return resolve(undefined)
       resolve(

@@ -10963,7 +10963,7 @@ var require_websocket_server = __commonJS({
 });
 
 // bridge/src/main.ts
-import { dirname, join as join4, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/helpers/util.js
@@ -40378,11 +40378,16 @@ function loadConfig(pluginRoot2) {
 }
 function defaultClipDir() {
   if (process.env.CLAUDE_PLUGIN_DATA) return join(process.env.CLAUDE_PLUGIN_DATA, "clips");
+  if (process.platform === "win32") return join(localAppData(), "voice-wayfinder", "Cache", "clips");
   return join(homedir(), "Library", "Caches", "voice-wayfinder", "clips");
 }
 function defaultLogDir() {
   if (process.env.CLAUDE_PLUGIN_DATA) return join(process.env.CLAUDE_PLUGIN_DATA, "transcripts");
+  if (process.platform === "win32") return join(localAppData(), "voice-wayfinder", "Logs");
   return join(homedir(), "Library", "Logs", "voice-wayfinder");
+}
+function localAppData() {
+  return process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
 }
 function deepMerge(base, over) {
   if (!isObject2(base) || !isObject2(over)) return over === void 0 ? base : over;
@@ -40396,6 +40401,10 @@ function isObject2(v) {
 
 // bridge/src/audio.ts
 import { spawn } from "node:child_process";
+import { join as join2 } from "node:path";
+function helperPath(pluginRoot2, platform = process.platform) {
+  return join2(pluginRoot2, "native", "vw-audio", platform === "win32" ? "vw-audio.exe" : "vw-audio");
+}
 var EchoCancellationUnavailable = class extends Error {
 };
 var HelperAudioDevice = class {
@@ -40428,7 +40437,10 @@ var HelperAudioDevice = class {
   }
   launch() {
     return new Promise((resolve2, reject) => {
-      const child = spawn(this.binary, [...this.echoCancellation ? ["--voice-processing"] : [], ...this.autoGain ? [] : ["--no-agc"]], { stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(this.binary, [...this.echoCancellation ? ["--voice-processing"] : [], ...this.autoGain ? [] : ["--no-agc"]], {
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true
+      });
       this.child = child;
       let ready = false;
       child.on("error", (err) => reject(new Error(`audio helper failed to start (${this.binary}): ${err.message}. Run npm run build:audio.`)));
@@ -40501,7 +40513,7 @@ var HelperAudioDevice = class {
 // bridge/src/clips.ts
 import { createHash } from "node:crypto";
 import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 var ClipCache = class {
   mem = /* @__PURE__ */ new Map();
   dir;
@@ -40536,14 +40548,14 @@ var ClipCache = class {
   }
   file(text2) {
     if (!this.dir) return void 0;
-    return join2(this.dir, `${createHash("sha1").update(`${this.voiceKey}
+    return join3(this.dir, `${createHash("sha1").update(`${this.voiceKey}
 ${text2}`).digest("hex")}.pcm`);
   }
 };
 
 // bridge/src/log.ts
 import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 var SECRET = /\b(sk-[A-Za-z0-9_-]{12,}|0\.[0-9a-f-]{20,}\.[A-Za-z0-9+/=:]{20,})/g;
 var redact = (text2) => text2.replace(SECRET, "[redacted]");
 var localDay = (at) => {
@@ -40557,9 +40569,9 @@ var TranscriptLog = class {
     this.dir = dir;
   }
   begin(sessionId, meta3) {
-    const folder = join3(this.dir, localDay(Date.now()));
+    const folder = join4(this.dir, localDay(Date.now()));
     mkdirSync2(folder, { recursive: true });
-    this.file = join3(folder, `${sessionId}.jsonl`);
+    this.file = join4(folder, `${sessionId}.jsonl`);
     this.append({ kind: "session", sessionId, ...meta3, at: Date.now() });
   }
   line(line) {
@@ -40583,8 +40595,8 @@ var TranscriptLog = class {
     const n = new Date(now);
     const from = localDay(new Date(n.getFullYear(), n.getMonth(), 0).getTime());
     for (const day of readdirSync(this.dir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && d >= from && d <= today)) {
-      for (const f of readdirSync(join3(this.dir, day)).filter((f2) => f2.endsWith(".jsonl"))) {
-        for (const raw of readFileSync3(join3(this.dir, day, f), "utf8").split("\n")) {
+      for (const f of readdirSync(join4(this.dir, day)).filter((f2) => f2.endsWith(".jsonl"))) {
+        for (const raw of readFileSync3(join4(this.dir, day, f), "utf8").split("\n")) {
           if (!raw.includes('"kind":"end"')) continue;
           try {
             const r = JSON.parse(raw);
@@ -41679,7 +41691,7 @@ function compareVersions(a, b) {
 }
 function checkClaudeCodeVersion() {
   return new Promise((resolve2) => {
-    execFile("claude", ["--version"], { timeout: 5e3 }, (err, stdout) => {
+    execFile("claude", ["--version"], { timeout: 5e3, windowsHide: true }, (err, stdout) => {
       const found = /(\d+\.\d+\.\d+)/.exec(stdout ?? "")?.[1];
       if (err || !found) return resolve2(void 0);
       resolve2(
@@ -41696,6 +41708,9 @@ var cfg = loadConfig(pluginRoot);
 var apiKey = process.env[cfg.openai.apiKeyEnv];
 delete process.env[cfg.openai.apiKeyEnv];
 delete process.env.BWS_ACCESS_TOKEN;
+function storeTokenHint() {
+  return process.platform === "win32" ? "Store the bws access token in Windows Credential Manager with npm run setup (in the plugin repo), or: cmdkey /generic:voice-wayfinder-bws /user:%USERNAME% /pass" : 'Store the bws access token with: security add-generic-password -s voice-wayfinder-bws -a "$USER" -w';
+}
 function thinkingCue() {
   const { thinkingCue: cue, thinkingCueAfterMs: afterMs, thinkingCueRepeatMs: repeatMs } = cfg.conversation;
   if (!cue) return void 0;
@@ -41706,12 +41721,12 @@ var session = new VoiceSession({
     if (!apiKey) {
       const why = process.env.VOICE_WAYFINDER_SECRET_PROBLEM ?? `${cfg.openai.apiKeyEnv} is not set`;
       throw new Error(
-        `No OpenAI key: ${why}. Store the bws access token with: security add-generic-password -s voice-wayfinder-bws -a "$USER" -w then restart Claude Code. See the README section "Secrets".`
+        `No OpenAI key: ${why}. ${storeTokenHint()} then restart Claude Code. See the README section "Secrets".`
       );
     }
     return new OpenAIRealtimeProvider(cfg.openai, apiKey);
   },
-  createAudio: () => new HelperAudioDevice(join4(pluginRoot, "native", "vw-audio", "vw-audio"), cfg.audio.echoCancellation, cfg.audio.autoGain ?? false),
+  createAudio: () => new HelperAudioDevice(helperPath(pluginRoot), cfg.audio.echoCancellation, cfg.audio.autoGain ?? false),
   log: new TranscriptLog(cfg.logDir ?? defaultLogDir()),
   endOfReplyMs: cfg.conversation.endOfReplyMs,
   bargeInConfirmMs: cfg.conversation.bargeInConfirmMs,
