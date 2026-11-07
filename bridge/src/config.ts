@@ -17,6 +17,17 @@ export type OpenAIConfig = {
   turnDetection: TurnDetection
   noiseReduction: 'near_field' | 'far_field' | null
   pricingUsd: { textInPerMTok: number; audioOutPerMTok: number; textOutPerMTok: number; transcriptionPerMin: number }
+  /** A small text model that checks each spoken reply before a round moves on (bridge/src/understand.ts). */
+  understanding?: {
+    enabled: boolean
+    /** "decisions": the Decisions API (typed answers, fixed confirmations); "responses": a text model writing JSON. */
+    api?: 'decisions' | 'responses'
+    model: string
+    timeoutMs: number
+    /** Decisions: an answer below this confidence counts as noise and is asked again. */
+    minConfidence?: number
+    pricingUsd: { inPerMTok: number; outPerMTok: number }
+  }
 }
 
 export type BridgeConfig = {

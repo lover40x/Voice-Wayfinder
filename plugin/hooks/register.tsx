@@ -497,6 +497,7 @@ export const register: Register = on => {
                   </Text>{' '}
                   {line.text}
                   {line.interrupted ? <Text dimColor> (interrupted)</Text> : ''}
+                  {line.unclear ? <Text dimColor> (not clear, asked again)</Text> : ''}
                 </Text>
               ))}
           </Box>

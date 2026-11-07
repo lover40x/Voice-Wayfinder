@@ -1,6 +1,8 @@
 // The adapter seam: a voice provider is the ears and mouth, nothing more.
 // OpenAI Realtime is the first adapter; another provider is one new file.
 
+import type { Understanding, UnderstandRequest } from './understand.ts'
+
 export type SpeechStatus = 'completed' | 'cancelled' | 'failed'
 
 export type ProviderEvent =
@@ -12,7 +14,7 @@ export type ProviderEvent =
   | { type: 'user.transcript_delta'; itemId: string; delta: string }
   | { type: 'user.transcript'; itemId: string; text: string }
   | { type: 'user.transcript_failed'; itemId: string; message: string }
-  | { type: 'usage'; costUsd: number; kind: 'speech' | 'transcription' }
+  | { type: 'usage'; costUsd: number; kind: 'speech' | 'transcription' | 'understanding' }
   | { type: 'warning'; message: string }
   | { type: 'closed'; reason: string; isExpected: boolean }
 
@@ -35,4 +37,9 @@ export interface VoiceProvider {
   /** Terms the speech recogniser should expect (ticket names, tech words). */
   setVocabulary(terms: readonly string[]): void
   onEvent(handler: (e: ProviderEvent) => void): void
+  /**
+   * Reads a spoken reply against its question (see understand.ts). Optional:
+   * without it, or when it fails, the bridge takes what was heard as the answer.
+   */
+  understand?(request: UnderstandRequest, signal?: AbortSignal): Promise<Understanding | undefined>
 }

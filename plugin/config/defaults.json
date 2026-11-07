@@ -17,6 +17,14 @@
       "silenceDurationMs": 500
     },
     "noiseReduction": "near_field",
+    "understanding": {
+      "enabled": true,
+      "api": "decisions",
+      "model": "gpt-6-luna",
+      "timeoutMs": 2000,
+      "minConfidence": 0.4,
+      "pricingUsd": { "inPerMTok": 0.1, "outPerMTok": 0 }
+    },
     "pricingUsd": {
       "textInPerMTok": 4,
       "audioOutPerMTok": 64,

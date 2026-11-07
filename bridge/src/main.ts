@@ -1,3 +1,4 @@
+import type { Understanding } from './understand.ts'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -92,6 +93,25 @@ async function guarded<T>(extra: Extra, run: () => Promise<T>, render: (r: T) =>
     return { ...text((err as Error).message), isError: true }
   } finally {
     clearInterval(beat)
+  }
+}
+
+/** How the reply read against the question, in a line for Claude; '' when it was not checked. */
+const describeUnderstood = (u?: Understanding) => {
+  if (!u) return ''
+  switch (u.kind) {
+    case 'answer':
+      return `Understood as: ${u.answer}${u.echo ? ` (confirmed aloud: "${u.echo}")` : ''}.`
+    case 'question':
+      return `They asked back instead of answering (${u.answer}). Answer that first, then ask this question again.`
+    case 'comment':
+      return `They said something else instead of answering (${u.answer}). Respond to it, then come back to this question.`
+    case 'unclear':
+      return 'Still not clear after asking again (noise or garbled speech): ask it differently, or confirm what you think they meant.'
+    case 'repeat':
+      return 'They kept asking to hear it again: ask it shorter and simpler.'
+    case 'correction':
+      return `They say their previous answer was heard wrong (${u.answer}). Say "เมื่อกี้น่าจะฟังผิดค่ะ", ask that previous question again, fix it in your notes, then come back to this one.`
   }
 }
 
@@ -194,6 +214,8 @@ server.registerTool(
         if (r.repeats) lines.push(`The person asked to hear the question again; it was repeated ${r.repeats} time(s) before this answer.`)
         if (r.said.status !== 'completed') lines.push(describeSay(r.said))
         if (r.said.status === 'completed' || r.said.status === 'interrupted') lines.push(describeReply(r.reply))
+        const understood = describeUnderstood(r.understood)
+        if (understood) lines.push(understood)
         return text(lines.join('\n'), r)
       },
     ),
@@ -228,7 +250,8 @@ server.registerTool(
         r.answers.forEach((a, i) => {
           const heard = a.status === 'replied' ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [], pausedMs: a.pausedMs })})`
           const notes = [a.interrupted && 'they cut in while it was being asked', a.repeats && `asked to hear it again, repeated ${a.repeats}×`].filter(Boolean)
-          lines.push(`Q${i + 1}: ${a.question}\nA${i + 1}${notes.length ? ` (${notes.join('; ')})` : ''}: ${heard}`)
+          const understood = describeUnderstood(a.understood)
+          lines.push(`Q${i + 1}: ${a.question}\nA${i + 1}${notes.length ? ` (${notes.join('; ')})` : ''}: ${heard}${understood ? `\n${understood}` : ''}`)
         })
         if (r.unasked.length) lines.push(`Not asked: ${r.unasked.join(' | ')}`)
         lines.push('Answers are Thai speech, transcribed; English terms may be misheard.')

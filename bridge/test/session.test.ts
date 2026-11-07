@@ -12,6 +12,7 @@ import { isRepeatRequest } from '../src/session.ts'
 import { waveTone } from '../src/tone.ts'
 import type { ProviderEvent, VoiceProvider } from '../src/provider.ts'
 import { VoiceSession } from '../src/session.ts'
+import type { Understanding, UnderstandRequest } from '../src/understand.ts'
 
 class FakeProvider implements VoiceProvider {
   readonly name = 'fake'
@@ -50,6 +51,13 @@ class FakeProvider implements VoiceProvider {
   }
   emit(e: ProviderEvent) {
     for (const h of this.handlers) h(e)
+  }
+  /** How replies read, as the understanding model would say; undefined: no opinion (the reply stands). */
+  understandWith?: (r: UnderstandRequest) => Understanding | undefined
+  understood: UnderstandRequest[] = []
+  async understand(r: UnderstandRequest) {
+    this.understood.push(r)
+    return this.understandWith?.(r)
   }
   /** The person says `text`: VAD start, stop, commit, transcript. */
   utter(text: string, id = text) {
@@ -146,7 +154,9 @@ test('a finished reply is acknowledged at once with a ready clip', async () => {
   const { provider, audio, session } = setup({ ...withClips, clips: new ClipCache(undefined, 't1') })
   const reply = session.listen(5000)
   await tick()
-  assert.deepEqual(provider.synthesized, ['ค่ะ', 'รับทราบค่ะ'])
+  // The acknowledgements, then the fixed confirmations used when replies are checked.
+  assert.deepEqual(provider.synthesized.slice(0, 2), ['ค่ะ', 'รับทราบค่ะ'])
+  assert.ok(provider.synthesized.includes('ขอโทษค่ะ ได้ยินไม่ชัด พูดอีกทีได้ไหมคะ'))
   provider.utter('ได้ค่ะ')
   await reply
   assert.deepEqual(audio.plays, [CLIP])
@@ -525,10 +535,12 @@ test('in a round, a typed "again" repeats that question and the round goes on', 
 })
 
 test('repeat requests are told apart from real answers', () => {
-  for (const t of ['ฟังไม่ทัน', 'ขออีกที', 'พูดใหม่ได้ไหม', 'อะไรนะคะ', 'ไม่ได้ยินครับ', 'ทวนหน่อย', 'repeat please', 'say that again']) {
+  for (const t of ['ฟังไม่ทัน', 'ขออีกที', 'พูดใหม่ได้ไหม', 'อะไรนะคะ', 'ไม่ได้ยินครับ', 'ทวนหน่อย', 'repeat please', 'say that again', 'ขอฟังอีกรอบได้ไหมคะ', 'ถามใหม่อีกทีได้ไหม']) {
     assert.equal(isRepeatRequest(t), true, t)
   }
-  for (const t of ['2', 'ข้อสอง', 'ใช่ครับ', 'ไม่ทัน', 'ยังไม่ชัดเจน', 'ให้ส่งแจ้งเตือนอีกครั้งตอนเช้า ถ้ายังไม่มีใครเปิดดูภายในหนึ่งชั่วโมง', 'ไม่ซ้ำกัน']) {
+  for (const t of ['2', 'ข้อสอง', 'ใช่ครับ', 'ไม่ทัน', 'ยังไม่ชัดเจน', 'ให้ส่งแจ้งเตือนอีกครั้งตอนเช้า ถ้ายังไม่มีใครเปิดดูภายในหนึ่งชั่วโมง', 'ไม่ซ้ำกัน',
+    // From a live session: answers and complaints the old check took as "say it again".
+    'ไม่ต้องถามใหม่', 'ใช่ ไม่ต้องถามใหม่', 'ไม่ต้องถามใหม่ ทำไมถามซ้ำสองรอบแล้ว', 'ทำไมถามซ้ำ', 'ได้ ไม่ต้องทวน', "don't repeat it"]) {
     assert.equal(isRepeatRequest(t), false, t)
   }
 })
@@ -746,4 +758,204 @@ test('with no voice call waiting, the pane takes the recap request once', async 
   assert.equal(t.accepted, true)
   assert.ok(Math.abs(t.pausedMs! - 120_000) < 1000)
   assert.equal(session.control('take').accepted, false)
+})
+
+/** Reads replies the way the model did on the live examples. */
+const READS: Record<string, Understanding> = {
+  กาฬสินธุ์: { kind: 'unclear', answer: '', echo: '' },
+  ไทย: { kind: 'answer', answer: 'ใช่', echo: 'ใช่ค่ะ' },
+  ข้อสอง: { kind: 'answer', answer: '2. withdrawn', echo: 'ข้อสองนะคะ' },
+  'ไม่ค่อยเข้าใจว่าตัดสินใจเรื่องอะไร': { kind: 'question', answer: 'ไม่เข้าใจว่าตัดสินใจเรื่องอะไร', echo: '' },
+  'ใช่ ไม่ต้องถามใหม่': { kind: 'answer', answer: 'ใช่', echo: 'ใช่ค่ะ' },
+}
+
+/** Speaks each new speech through and answers it with the next reply, until the call settles. */
+async function answerInTurn(provider: FakeProvider, audio: FakeAudio, replies: string[], until: Promise<unknown>) {
+  let settled = false
+  void until.then(() => (settled = true))
+  let spoken = 0
+  while (!settled) {
+    await tick(15)
+    if (provider.said.length > spoken) {
+      spoken = provider.said.length
+      speakThrough(provider, audio, `s${spoken}`)
+      await tick(15)
+      const r = replies.shift()
+      if (r) provider.utter(r, `${r}-${spoken}`)
+    }
+  }
+}
+
+test('noise in a round is asked again instead of taken as the answer, and the answer is echoed with the next question', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = r => READS[r.heard]
+  const round = session.interview(['ข้อสาม เก็บสองชุด ใช้ได้ไหมคะ', 'ข้อสี่ แทนที่เลย ใช่ไหมคะ'], 5000)
+  await answerInTurn(provider, audio, ['กาฬสินธุ์', 'ไทย', 'ข้อสอง'], round)
+  const r = await round
+  assert.deepEqual(provider.said.slice(0, 3), ['ข้อสาม เก็บสองชุด ใช้ได้ไหมคะ', 'ขอโทษค่ะ ได้ยินไม่ชัด ข้อสาม เก็บสองชุด ใช้ได้ไหมคะ', 'ใช่ค่ะ ข้อสี่ แทนที่เลย ใช่ไหมคะ'])
+  assert.deepEqual(r.answers.map(a => a.understood?.answer), ['ใช่', '2. withdrawn'])
+  assert.equal(r.unasked.length, 0)
+  // The noise stays in the conversation, marked as not taken.
+  assert.equal((session.state() as VoiceStateV1).transcript.find(l => l.text === 'กาฬสินธุ์')?.unclear, true)
+})
+
+test('a question back stops the round so Claude can answer it', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = r => READS[r.heard]
+  const round = session.interview(['ข้อสี่ ใช่ไหมคะ', 'ข้อห้า ใช่ไหมคะ', 'ข้อหก ใช่ไหมคะ'], 5000)
+  await answerInTurn(provider, audio, ['ไม่ค่อยเข้าใจว่าตัดสินใจเรื่องอะไร'], round)
+  const r = await round
+  assert.equal(r.answers[0]!.understood?.kind, 'question')
+  assert.deepEqual(r.unasked, ['ข้อห้า ใช่ไหมคะ', 'ข้อหก ใช่ไหมคะ'])
+  assert.equal(provider.said.length, 1)
+})
+
+test('noise that stays unclear goes to Claude after two more tries', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = r => READS[r.heard]
+  const turn = session.converse('ข้อสาม ใช้ได้ไหมคะ', 5000)
+  await answerInTurn(provider, audio, ['กาฬสินธุ์', 'กาฬสินธุ์', 'กาฬสินธุ์'], turn)
+  const r = await turn
+  assert.equal(provider.said.length, 3)
+  assert.equal(r.understood?.kind, 'unclear')
+  assert.equal(r.reply.text, 'กาฬสินธุ์')
+})
+
+test('without an understanding, "yes, don\'t ask again" is still an answer', async () => {
+  const { provider, audio, session } = setup()
+  const turn = session.converse('ข้อสี่ ใช่ไหมคะ', 5000)
+  await answerInTurn(provider, audio, ['ใช่ ไม่ต้องถามใหม่'], turn)
+  const r = await turn
+  assert.equal(r.reply.text, 'ใช่ ไม่ต้องถามใหม่')
+  assert.equal(r.repeats, 0)
+  assert.equal(provider.understood.length, 1)
+})
+
+test('a typed answer is taken as written, without a check', async () => {
+  const { provider, audio, session } = setup()
+  provider.understandWith = () => ({ kind: 'unclear', answer: '', echo: '' })
+  const turn = session.converse('ข้อสี่ ใช่ไหมคะ', 5000)
+  await tick()
+  speakThrough(provider, audio, 's1')
+  await tick()
+  session.control('type', '2')
+  assert.equal((await turn).reply.text, '2')
+  assert.equal(provider.understood.length, 0)
+})
+
+test('back from a long pause mid-question, converse returns for the recap instead of waiting for a reply', async () => {
+  let skew = 0
+  const { provider, audio, session } = setup({ recapAfterPauseMs: 60_000, now: () => Date.now() + skew })
+  const turn = session.converse('ข้อสี่ ใช่ไหมคะ', 5000)
+  await tick()
+  provider.emit({ type: 'speech.audio', speechId: 's1', pcm: Buffer.alloc(4800) })
+  session.control('pause')
+  skew += 120_000
+  session.control('resume')
+  const r = await Promise.race([turn, tick(500).then(() => undefined)])
+  assert.equal(r?.reply.status, 'resumed')
+  void audio
+})
+
+test('a lone word recognition makes of "ใช่" is read as yes; anything longer is kept', async () => {
+  const { normaliseHeard, parseUnderstanding } = await import('../src/understand.ts')
+  for (const t of ['ไทย', 'ไฮ', 'ไฉ่', 'ไทยครับ']) assert.equal(normaliseHeard(t), 'ใช่', t)
+  for (const t of ['ประเทศไทย', 'ไทยดีกว่า', 'ข้อสอง']) assert.equal(normaliseHeard(t), t, t)
+  assert.equal(parseUnderstanding('{"kind":"answer","answer":"yes","echo":"ใช่ค่ะ"}')?.echo, 'ใช่ค่ะ')
+  assert.equal(parseUnderstanding('{"kind":"maybe"}'), undefined)
+  assert.equal(parseUnderstanding('not json'), undefined)
+})
+
+test('with ready clips, noise gets an instant "say it again" without the question read again, and a yes is confirmed by clip', async () => {
+  const { provider, audio, session } = setup({ ...withClips, clips: new ClipCache(undefined, 'echo') })
+  provider.understandWith = r => (r.heard === 'กาฬสินธุ์' ? { kind: 'unclear', answer: '', echo: '' } : { kind: 'answer', answer: 'yes', echo: 'ใช่ค่ะ' })
+  const round = session.interview(['ข้อสี่ ใช่ไหมคะ', 'ข้อห้า ใช่ไหมคะ'], 5000)
+  await tick(30)
+  speakThrough(provider, audio, 's1')
+  await tick()
+  provider.utter('กาฬสินธุ์', 'n1')
+  await tick(80)
+  // Asked again by clip: no new speech, the clip played, the line shown.
+  assert.equal(provider.said.length, 1)
+  assert.ok((session.state() as VoiceStateV1).transcript.some(l => l.who === 'claude' && l.text.startsWith('ขอโทษค่ะ ได้ยินไม่ชัด')))
+  provider.utter('ไทย', 'y1')
+  await tick(80)
+  // The next question follows the "ใช่ค่ะ" clip, with no spoken lead.
+  assert.equal(provider.said[1], 'ข้อห้า ใช่ไหมคะ')
+  assert.ok((session.state() as VoiceStateV1).transcript.some(l => l.who === 'claude' && l.text === 'ใช่ค่ะ'))
+  speakThrough(provider, audio, 's2')
+  await tick()
+  provider.utter('ได้', 'y2')
+  const r = await round
+  assert.deepEqual(r.answers.map(a => a.understood?.answer), ['yes', 'yes'])
+  assert.equal(provider.understood[0]!.questionNo, 1)
+})
+
+test('the Decisions answers become an understanding with a fixed confirmation', async () => {
+  const { cardChoices, decisionsRequest, readDecisions } = await import('../src/understand.ts')
+  const card = '**Q1** Tracker?\n1. GitHub Issues (recommended)\n2. Linear\n\n**Q2** Alerts?\n1. Location manager\n2. Whole Lark group\n3. Nobody'
+  assert.deepEqual(cardChoices(card, 2).map(c => c.value), ['1', '2', '3'])
+  assert.equal(cardChoices(card, 2)[1]!.description, 'Whole Lark group')
+  const req = { question: 'ข้อสอง แจ้งใคร', card, questionNo: 2, heard: 'ข้อสอง' }
+  const body = decisionsRequest('gpt-6-luna', req) as { questions: { name: string; choices: { value: string }[] }[] }
+  assert.deepEqual(body.questions.map(q => q.name), ['kind', 'which'])
+  assert.deepEqual(body.questions[1]!.choices.map(c => c.value), ['1', '2', '3', 'none'])
+  assert.deepEqual(readDecisions([{ type: 'choice', name: 'kind', choice: 'choice' }, { type: 'choice', name: 'which', choice: '2' }], req), {
+    kind: 'answer',
+    answer: '2. Whole Lark group',
+    echo: 'ข้อสองนะคะ',
+  })
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes' }], req)?.echo, 'ใช่ค่ะ')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'unclear' }], req)?.kind, 'unclear')
+  assert.equal(readDecisions([{ type: 'refusal', name: 'kind' }], req), undefined)
+  // Noise reads as a low-confidence answer ("แม่จ๋า มากจัง" → yes at 0.12): asked again.
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.12 }], req)?.kind, 'unclear')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.68 }], req)?.kind, 'answer')
+  // A question back stays one even when unsure: Claude sees the words.
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'question', confidence: 0.2 }], req)?.kind, 'question')
+  // No numbered choices: only the kind is asked.
+  assert.equal((decisionsRequest('gpt-6-luna', { question: 'ใช้ได้ไหมคะ', heard: 'ได้' }) as { questions: unknown[] }).questions.length, 1)
+})
+
+test('"that was wrong" right after a confirmation goes back to the previous question and asks it again', async () => {
+  const { provider, audio, session } = setup({ ...withClips, clips: new ClipCache(undefined, 'correct') })
+  provider.understandWith = r =>
+    r.heard === 'ไทย' ? { kind: 'answer', answer: 'no', echo: 'ไม่ใช่นะคะ' } : r.heard.startsWith('เดี๋ยว') ? { kind: 'correction', answer: r.heard, echo: '' } : { kind: 'answer', answer: 'yes', echo: 'ใช่ค่ะ' }
+  const round = session.interview(['ข้อสี่ ใช่ไหมคะ', 'ข้อห้า ใช่ไหมคะ'], 5000)
+  await answerInTurn(provider, audio, ['ไทย', 'เดี๋ยว เมื่อกี้บอกว่าใช่', 'ใช่', 'ได้'], round)
+  const r = await round
+  // Q4, Q5 (cut short by the correction), Q4 again, then Q5.
+  assert.deepEqual(provider.said, ['ข้อสี่ ใช่ไหมคะ', 'ข้อห้า ใช่ไหมคะ', 'ข้อสี่ ใช่ไหมคะ', 'ข้อห้า ใช่ไหมคะ'])
+  assert.ok((session.state() as VoiceStateV1).transcript.some(l => l.text === 'เมื่อกี้น่าจะฟังผิดค่ะ งั้นเรากลับไปข้อก่อนหน้าอีกครั้งนะคะ'))
+  // The misheard "no" is gone; each question has its one, corrected answer.
+  assert.deepEqual(r.answers.map(a => [a.question, a.understood?.answer]), [
+    ['ข้อสี่ ใช่ไหมคะ', 'yes'],
+    ['ข้อห้า ใช่ไหมคะ', 'yes'],
+  ])
+  // The check for Q5 knew what Q4's answer was taken as.
+  assert.equal(provider.understood[1]!.previous?.answer, 'no (confirmed aloud: "ไม่ใช่นะคะ")')
+})
+
+test('words that point back, or a quick "no" over the new question, read as a correction', async () => {
+  const { refineUnderstanding } = await import('../src/understand.ts')
+  const previous = { question: 'ข้อสี่ ใช่ไหมคะ', answer: 'no (confirmed aloud: "ไม่ใช่นะคะ")' }
+  const no = { kind: 'answer' as const, answer: 'no', echo: 'ไม่ใช่นะคะ' }
+  const yes = { kind: 'answer' as const, answer: 'yes', echo: 'ใช่ค่ะ' }
+  assert.equal(refineUnderstanding(no, { question: 'ข้อห้า', heard: 'ไม่ใช่ ข้อที่แล้วใช่', previous })?.kind, 'correction')
+  assert.equal(refineUnderstanding(undefined, { question: 'ข้อห้า', heard: 'ย้อนกลับไปข้อที่แล้ว', previous })?.kind, 'correction')
+  assert.equal(refineUnderstanding(no, { question: 'ข้อห้า', heard: 'ไม่ใช่ๆ', previous, cutInAfterMs: 400 })?.kind, 'correction')
+  assert.equal(refineUnderstanding(yes, { question: 'ข้อห้า', heard: 'ใช่', previous, cutInAfterMs: 400 })?.kind, 'repeat')
+  // Heard the new question through: a "no" answers it.
+  assert.equal(refineUnderstanding(no, { question: 'ข้อห้า', heard: 'ไม่ใช่', previous })?.kind, 'answer')
+  assert.equal(refineUnderstanding(no, { question: 'ข้อห้า', heard: 'ไม่ใช่', previous, cutInAfterMs: 4000 })?.kind, 'answer')
+  // No earlier answer: nothing to correct.
+  assert.equal(refineUnderstanding(no, { question: 'ข้อหนึ่ง', heard: 'เมื่อกี้ไม่ได้ยิน' })?.kind, 'answer')
+})
+
+test('a reply that opens with a plain yes or no is kept even when the model is unsure', async () => {
+  const { readDecisions } = await import('../src/understand.ts')
+  const req = { question: 'ข้อห้า ใช้ CRM reference อย่างเดียว ใช้ได้ไหมคะ', heard: 'ไม่ได้ ต้องใช้เบอร์โทรด้วย' }
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'no', confidence: 0.3 }], req)?.kind, 'answer')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.12 }], { ...req, heard: 'แม่จ๋า มากจัง' })?.kind, 'unclear')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.2 }], { ...req, heard: 'ได้ยินไม่ชัด' })?.kind, 'unclear')
 })

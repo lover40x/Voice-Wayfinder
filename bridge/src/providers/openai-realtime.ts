@@ -1,6 +1,7 @@
 import WebSocket from 'ws'
 
 import type { OpenAIConfig } from '../config.ts'
+import { decisionsRequest, INSTRUCTIONS, parseUnderstanding, readDecisions, SCHEMA, userMessage, type Understanding, type UnderstandRequest } from '../understand.ts'
 import type { ProviderEvent, SpeechStatus, VoiceProvider } from '../provider.ts'
 
 const URL = 'wss://api.openai.com/v1/realtime'
@@ -115,6 +116,67 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
       this.speeches.set(speechId, { speechId, cancelRequested: false, clip: { chunks: [], resolve, reject } })
       this.requestSpeech(speechId, text)
     })
+  }
+
+  /** One Responses API call with a strict JSON schema; undefined on any failure or timeout. */
+  async understand(request: UnderstandRequest, signal?: AbortSignal): Promise<Understanding | undefined> {
+    const u = this.cfg.understanding
+    if (!u?.enabled) return undefined
+    const timeout = AbortSignal.timeout(u.timeoutMs)
+    if ((u.api ?? 'decisions') === 'decisions') return this.decide(request, signal ? AbortSignal.any([signal, timeout]) : timeout)
+    try {
+      const res = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: u.model,
+          instructions: INSTRUCTIONS,
+          input: userMessage(request),
+          ...(/^(gpt-5|o\d)/.test(u.model) ? { reasoning: { effort: 'minimal' } } : { temperature: 0 }),
+          text: { format: { type: 'json_schema', name: 'understanding', strict: true, schema: SCHEMA } },
+          max_output_tokens: 300,
+          store: false,
+        }),
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      })
+      if (!res.ok) return undefined
+      const body = (await res.json()) as {
+        output?: { content?: { type: string; text?: string }[] }[]
+        usage?: { input_tokens?: number; output_tokens?: number }
+      }
+      const tokensIn = body.usage?.input_tokens ?? 0
+      const tokensOut = body.usage?.output_tokens ?? 0
+      if (tokensIn || tokensOut) {
+        this.emit({ type: 'usage', kind: 'understanding', costUsd: (tokensIn * u.pricingUsd.inPerMTok + tokensOut * u.pricingUsd.outPerMTok) / 1e6 })
+      }
+      const text = body.output?.flatMap(o => o.content ?? []).find(c => c.type === 'output_text')?.text
+      return text ? parseUnderstanding(text) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The Decisions API: typed answers, about 0.3 s, input tokens only. */
+  private async decide(request: UnderstandRequest, signal: AbortSignal): Promise<Understanding | undefined> {
+    const u = this.cfg.understanding!
+    try {
+      const res = await fetch('https://api.openai.com/v1/decisions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(decisionsRequest(u.model, request)),
+        signal,
+      })
+      if (!res.ok) return undefined
+      const body = (await res.json()) as { answers?: { type: string; name?: string | null; choice?: string | boolean; confidence?: number }[]; usage?: { input_tokens?: number; output_tokens?: number } }
+      const tokensIn = body.usage?.input_tokens ?? 0
+      const tokensOut = body.usage?.output_tokens ?? 0
+      if (tokensIn || tokensOut) {
+        this.emit({ type: 'usage', kind: 'understanding', costUsd: (tokensIn * u.pricingUsd.inPerMTok + tokensOut * u.pricingUsd.outPerMTok) / 1e6 })
+      }
+      return body.answers ? readDecisions(body.answers, request, u.minConfidence) : undefined
+    } catch {
+      return undefined
+    }
   }
 
   private requestSpeech(speechId: string, text: string, extra = '') {

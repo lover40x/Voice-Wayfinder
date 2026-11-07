@@ -29,6 +29,8 @@ export type TranscriptLine = {
   who: 'user' | 'claude' | 'system'
   text: string
   interrupted?: boolean
+  /** Heard but not understood as an answer (noise, garbled): the question was asked again. */
+  unclear?: boolean
   /** The person typed this instead of saying it. */
   typed?: boolean
 }
@@ -43,6 +45,8 @@ export type VoiceSessionCost = {
   speechUsd: number
   /** Transcribing the person's speech. */
   transcriptionUsd: number
+  /** Checking each spoken reply against its question (a small text model). */
+  understandingUsd?: number
   spokenMs: number
   heardMs: number
 }

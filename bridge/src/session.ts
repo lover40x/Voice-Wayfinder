@@ -1,4 +1,5 @@
 import { isNoiseTranscript, NoiseGate, type NoiseGateOptions } from './gate.ts'
+import { ECHO, ECHO_CLIPS, refineUnderstanding, type Understanding } from './understand.ts'
 import { randomUUID } from 'node:crypto'
 
 import {
@@ -44,6 +45,13 @@ export type SessionDeps = {
   tickMs?: number
 }
 
+/** An answer as it was taken, for the next question's check: what was understood and said back. */
+function describeTaken(a: { answer: string; understood?: Understanding }): string {
+  const u = a.understood
+  if (!u || u.kind !== 'answer') return a.answer
+  return `${u.answer}${u.echo ? ` (confirmed aloud: "${u.echo}")` : ''}`
+}
+
 const STOPPED = 'The person ended voice mode (End). Continue in text and make no more voice calls until they start voice mode again.'
 
 export type SayStatus = 'completed' | 'interrupted' | 'cancelled' | 'failed' | 'skipped' | 'ended' | 'paused' | 'resumed'
@@ -54,9 +62,10 @@ export type ReplyStatus = 'replied' | 'timeout' | 'skipped' | 'ended' | 'cancell
 export type ReplyResult = { status: ReplyStatus; text: string; parts: string[]; typed?: boolean; pausedMs?: number }
 
 /** `repeats`: how many times the person asked to hear the question again. */
-export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult; repeats: number }
+/** `understood`: how the reply reads against the question, when it was checked (understand.ts). */
+export type ConverseResult = { said: SayResult; heardBefore: string[]; reply: ReplyResult; repeats: number; understood?: Understanding }
 
-export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean; repeats: number; pausedMs?: number }
+export type InterviewAnswer = { question: string; status: ReplyStatus; answer: string; interrupted: boolean; repeats: number; pausedMs?: number; understood?: Understanding }
 export type InterviewResult = { heardBefore: string[]; answers: InterviewAnswer[]; unasked: string[]; ended?: string }
 
 type ActiveSpeech = {
@@ -77,15 +86,25 @@ type Utterance = { text: string; at: number; typed?: boolean }
 const BYTES_PER_MS = 48 // PCM16 mono 24 kHz
 const MAX_LINES = 200
 const MAX_REPEATS = 3
+/** Noise or garbled words: the question is asked again this many times, then the reply goes to Claude as it is. */
+const MAX_UNCLEAR = 2
+/** How often one round may go back to an earlier question because an answer was misheard. */
+const MAX_CORRECTIONS = 3
 
 // "I didn't catch that / say it again", in the ways people say it. Matched only
 // on a short utterance, so an answer that happens to contain "again" is kept.
 const REPEAT =
   /ฟังไม่ทัน|ไม่ได้ยิน|ได้ยินไม่ชัด|ฟังไม่ชัด|อีกที|อีกรอบ|อีกครั้ง|พูดใหม่|ถามใหม่|พูดอีก|พูดซ้ำ|ถามซ้ำ|ทวนคำถาม|ทวนอีก|ทวนหน่อย|ทวนให้|อะไรนะ|ว่าไงนะ|ว่าอะไรนะ|พูดช้า|ช้าๆ|\brepeat\b|\bagain\b|\bpardon\b|say that|didn'?t catch/i
 
+// "Don't ask again", "why ask twice": the opposite of a repeat request. An
+// answer in the same breath ("ใช่ ไม่ต้องถามใหม่") also means it was heard.
+const NOT_REPEAT = /ไม่ต้อง|ไม่เป็นไร|อย่า|ทำไม|พอแล้ว|เข้าใจแล้ว|ได้ยินแล้ว|\b(don'?t|no need|why|stop)\b/i
+const ANSWER = /(^|\s)(ใช่|ไม่ใช่|ได้|ไม่ได้|โอเค|ok|okay|ตกลง|ถูก|ถูกต้อง|yes|no)(ค่ะ|คะ|ครับ|จ้ะ|จ้า|นะ)?($|\s)|ข้อ\s*(หนึ่ง|สอง|สาม|สี่|ห้า|แรก|\d)|\d/i
+
 export function isRepeatRequest(text: string): boolean {
   const t = text.trim()
-  return t.length > 0 && t.length <= 40 && REPEAT.test(t)
+  if (!t || t.length > 40 || !REPEAT.test(t)) return false
+  return !NOT_REPEAT.test(t) && !ANSWER.test(t)
 }
 
 const round = (usdValue: number) => Math.round(usdValue * 1000) / 1000
@@ -94,7 +113,7 @@ const minutes = (ms: number) => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 10
 
 /** "4.2 min, $0.31 (Claude's speech $0.27, transcription $0.04)" */
 export const describeCost = (c: VoiceSessionCost) =>
-  `${minutes(c.durationMs)}, ${usd(c.costUsd)} (Claude's speech ${usd(c.speechUsd)} for ${minutes(c.spokenMs)}, transcription ${usd(c.transcriptionUsd)} for ${minutes(c.heardMs)})`
+  `${minutes(c.durationMs)}, ${usd(c.costUsd)} (Claude's speech ${usd(c.speechUsd)} for ${minutes(c.spokenMs)}, transcription ${usd(c.transcriptionUsd)} for ${minutes(c.heardMs)}${c.understandingUsd ? `, understanding ${usd(c.understandingUsd)}` : ''})`
 
 /**
  * One long-lived voice conversation. The provider is the ears and mouth; every
@@ -124,6 +143,8 @@ export class VoiceSession {
    * voice call waits; Resume picks up where it was, the interrupted line again.
    */
   private paused = false
+  /** The last answer taken and how it was understood: what a "that was wrong" refers to. */
+  private lastAnswer?: { question: string; answer: string }
   private pausedAt = 0
   /** How long the last pause was, while Claude still owes the person a recap of where things stand. */
   private recapDue?: number
@@ -134,7 +155,7 @@ export class VoiceSession {
   private nextLineId = 1
   private card?: VoiceCard
   private rev = 1
-  private spend = { speech: 0, transcription: 0 }
+  private spend = { speech: 0, transcription: 0, understanding: 0 }
   private spokenMs = 0
   private heardMs = 0
   private lastSession?: VoiceSessionCost
@@ -258,13 +279,15 @@ export class VoiceSession {
     if (this.stopped) return { said: { status: 'ended', spokenMs: 0, detail: STOPPED }, heardBefore: [], reply: { status: 'ended', text: '', parts: [] }, repeats: 0 }
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
-    const { said, reply, repeats } = await this.ask(text, screen ? { screen } : undefined, timeoutMs, signal)
+    const { said, reply, repeats, understood } = await this.ask(text, screen ? { screen } : undefined, timeoutMs, signal, '', this.lastAnswer)
     if (!reply) {
       if (said.status === 'skipped') this.skipRequested = false
       const pausedMs = said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}
       return { said, heardBefore, reply: { status: said.status === 'failed' ? 'disconnected' : (said.status as ReplyStatus), text: '', parts: [], ...pausedMs }, repeats }
     }
-    return { said, heardBefore, reply, repeats }
+    // Claude speaks next: confirm what was understood meanwhile, or a quick "ค่ะ".
+    if (reply.status === 'replied') this.acknowledge(understood?.kind === 'answer' ? understood.echo : '')
+    return { said, heardBefore, reply, repeats, ...(understood ? { understood } : {}) }
   }
 
   /**
@@ -275,26 +298,67 @@ export class VoiceSession {
     if (this.stopped) return { heardBefore: [], answers: [], unasked: [...questions], ended: STOPPED }
     await this.ensureConnected()
     const heardBefore = this.queue.splice(0).map(u => u.text)
-    const answers: InterviewAnswer[] = []
-    for (const [i, question] of questions.entries()) {
+    // One entry per question index; a correction goes back and replaces the earlier one.
+    const byIndex: (InterviewAnswer | undefined)[] = []
+    const answers = () => byIndex.filter((a): a is InterviewAnswer => a !== undefined)
+    // What was understood of the last answer, said just before the next question.
+    let lead = ''
+    let corrections = 0
+    for (let i = 0; i < questions.length; i++) {
+      const question = questions[i]!
       const unasked = () => questions.slice(i + 1)
-      const { said, reply, repeats } = await this.ask(question, { screen, question: i + 1, of: questions.length }, timeoutMs, signal)
+      const before = i > 0 ? byIndex[i - 1] : undefined
+      const previous = before ? { question: before.question, answer: describeTaken(before) } : this.lastAnswer
+      const { said, reply, repeats, understood } = await this.ask(question, { screen, question: i + 1, of: questions.length }, timeoutMs, signal, lead, previous)
+      lead = ''
       if (said.status === 'skipped') {
         this.skipRequested = false
-        answers.push({ question, status: 'skipped', answer: '', interrupted: false, repeats })
+        byIndex[i] = { question, status: 'skipped', answer: '', interrupted: false, repeats }
         continue
       }
       if (!reply) {
         const status: ReplyStatus = said.status === 'failed' ? 'disconnected' : said.status === 'ended' ? 'ended' : said.status === 'resumed' ? 'resumed' : 'cancelled'
-        answers.push({ question, status, answer: '', interrupted: false, repeats, ...(said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}) })
-        return { heardBefore, answers, unasked: unasked() }
+        byIndex[i] = { question, status, answer: '', interrupted: false, repeats, ...(said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}) }
+        return { heardBefore, answers: answers(), unasked: unasked() }
       }
-      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === 'interrupted', repeats, ...(reply.pausedMs !== undefined ? { pausedMs: reply.pausedMs } : {}) })
+      // "That was wrong": say so, drop the earlier answer and ask that question again.
+      if (understood?.kind === 'correction' && i > 0 && corrections < MAX_CORRECTIONS) {
+        corrections++
+        this.deps.log?.timing({ what: 'correction', from: i + 1, heard: reply.text })
+        byIndex[i - 1] = undefined
+        this.lastAnswer = undefined
+        const clip = this.clipFor(ECHO.correction)
+        if (clip) {
+          this.addLine('claude', ECHO.correction)
+          this.playPcm(clip, ECHO.correction)
+        } else lead = ECHO.correction
+        i -= 2
+        continue
+      }
+      byIndex[i] = {
+        question,
+        status: reply.status,
+        answer: reply.text,
+        interrupted: said.status === 'interrupted',
+        repeats,
+        ...(reply.pausedMs !== undefined ? { pausedMs: reply.pausedMs } : {}),
+        ...(understood ? { understood } : {}),
+      }
       if (reply.status === 'ended' || reply.status === 'cancelled' || reply.status === 'disconnected' || reply.status === 'resumed') {
-        return { heardBefore, answers, unasked: unasked() }
+        return { heardBefore, answers: answers(), unasked: unasked() }
       }
+      const last = i === questions.length - 1
+      // Asked back, talked about something else, or a correction with no earlier question here: Claude takes it.
+      if (understood && (understood.kind === 'question' || understood.kind === 'comment' || understood.kind === 'correction')) {
+        this.acknowledge()
+        return { heardBefore, answers: answers(), unasked: unasked() }
+      }
+      // What was understood, said back: a ready clip at once, else spoken with the next question.
+      const echo = understood?.kind === 'answer' ? understood.echo : ''
+      if (echo && !last && !this.clipFor(echo)) lead = echo
+      else this.acknowledge(echo)
     }
-    return { heardBefore, answers, unasked: [] }
+    return { heardBefore, answers: answers(), unasked: [] }
   }
 
   control(action: VoiceControlAction, text = ''): { message: string; accepted: boolean; heard?: string[]; pausedMs?: number } {
@@ -498,7 +562,7 @@ export class VoiceSession {
     }
     this.provider = provider
     this.audio = audio
-    this.spend = { speech: 0, transcription: 0 }
+    this.spend = { speech: 0, transcription: 0, understanding: 0 }
     this.spokenMs = 0
     this.heardMs = 0
     this.startedAt = this.now()
@@ -531,19 +595,20 @@ export class VoiceSession {
       costUsd: round(this.currentCost()),
       speechUsd: round(this.spend.speech),
       transcriptionUsd: round(this.spend.transcription),
+      ...(this.spend.understanding ? { understandingUsd: round(this.spend.understanding) } : {}),
       spokenMs: this.spokenMs,
       heardMs: this.heardMs,
     }
     this.startedAt = undefined
     this.lastSession = cost
-    this.spend = { speech: 0, transcription: 0 }
+    this.spend = { speech: 0, transcription: 0, understanding: 0 }
     this.addLine('system', `${reason} OpenAI est.: ${describeCost(cost)}.`)
     this.deps.log?.end(reason, cost)
     this.history = undefined // re-read with this session in it
   }
 
   private currentCost() {
-    return this.spend.speech + this.spend.transcription
+    return this.spend.speech + this.spend.transcription + this.spend.understanding
   }
 
   /** Today's and this month's spend: ended sessions from the log, plus the one in progress. */
@@ -717,8 +782,22 @@ export class VoiceSession {
 
   // ---- helpers -------------------------------------------------------------
 
-  /** Says "heard you" at once, then the thinking cue if Claude takes a while. */
-  private acknowledge() {
+  /**
+   * Says "heard you" at once, then the thinking cue if Claude takes a while:
+   * `echo` (what was understood, "ข้อสองนะคะ") when there is one, else a ready clip.
+   */
+  private acknowledge(echo = '') {
+    const echoClip = echo ? this.clipFor(echo) : undefined
+    if (echoClip) {
+      this.addLine('claude', echo)
+      this.playPcm(echoClip, echo)
+      this.startThinkingCue()
+      return
+    }
+    if (echo) {
+      void this.say(echo).then(() => this.startThinkingCue())
+      return
+    }
     const clips = this.deps.clips
     const ready = clips ? (this.deps.acknowledgements ?? []).filter(t => clips.get(t)) : []
     if (ready.length) {
@@ -759,30 +838,96 @@ export class VoiceSession {
    * Speaks a question and collects the answer. "I didn't catch that" is no
    * answer: the question is asked again, a little slower, until one comes.
    */
-  private async ask(question: string, card: VoiceCard | undefined, timeoutMs: number, signal?: AbortSignal) {
+  private async ask(
+    question: string,
+    card: VoiceCard | undefined,
+    timeoutMs: number,
+    signal?: AbortSignal,
+    lead = '',
+    previous?: { question: string; answer: string },
+  ): Promise<{ said: SayResult; repeats: number; reply?: ReplyResult; understood?: Understanding }> {
     let repeats = 0
-    let text = question
+    let unclear = 0
+    let text = lead ? `${lead} ${question}` : question
+    let said: SayResult | undefined
+    let speak = true
     for (;;) {
-      const said = await this.say(text, signal, card, repeats > 0)
-      if (said.status === 'skipped' || said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed') {
-        return { said, repeats, reply: undefined }
+      if (speak || !said) {
+        said = await this.say(text, signal, card, repeats > 0)
+        if (said.status === 'skipped' || said.status === 'ended' || said.status === 'cancelled' || said.status === 'failed' || said.status === 'resumed') {
+          return { said, repeats }
+        }
       }
+      // Spoken over this question: when, so a "no" to the last confirmation is told from an answer.
+      const cutInAfterMs = speak && said.status === 'interrupted' ? said.spokenMs : undefined
+      speak = true
       const reply = await this.collectReply(timeoutMs, signal)
-      if (reply.status === 'replied' && repeats < MAX_REPEATS && isRepeatRequest(reply.text)) {
+      if (reply.status !== 'replied') return { said, repeats, reply }
+      // A typed reply is meant as written; a spoken one is checked against the question.
+      const understood = reply.typed ? undefined : await this.understandReply(question, card, reply.text, signal, previous, cutInAfterMs)
+      const kind = understood?.kind ?? (isRepeatRequest(reply.text) ? 'repeat' : 'answer')
+      if (kind === 'repeat' && repeats < MAX_REPEATS) {
         repeats++
-        this.deps.log?.timing({ what: 'repeat', n: repeats })
+        this.deps.log?.timing({ what: 'repeat', n: repeats, heard: reply.text })
         text = `ได้ค่ะ ${question}`
         continue
       }
-      if (reply.status === 'replied') this.acknowledge()
-      return { said, repeats, reply }
+      if (kind === 'unclear' && unclear < MAX_UNCLEAR) {
+        unclear++
+        this.deps.log?.timing({ what: 'unclear', n: unclear, heard: reply.text })
+        this.markLine(this.lastUserLineId(), { unclear: true })
+        // A ready clip asks again at once; the question stays on screen, not read again.
+        const clip = this.clipFor(ECHO.unclear)
+        if (clip) {
+          this.addLine('claude', ECHO.unclear)
+          this.playPcm(clip, ECHO.unclear)
+          speak = false
+          continue
+        }
+        text = `ขอโทษค่ะ ได้ยินไม่ชัด ${question}`
+        continue
+      }
+      if (!understood || understood.kind === 'answer') {
+        this.lastAnswer = { question, answer: understood ? describeTaken({ answer: reply.text, understood }) : reply.text }
+      }
+      return { said, repeats, reply, ...(understood ? { understood } : {}) }
     }
+  }
+
+  /** Asks the provider how the reply reads against the question; undefined when it can't tell (the reply then stands). */
+  private async understandReply(
+    question: string,
+    card: VoiceCard | undefined,
+    heard: string,
+    signal?: AbortSignal,
+    previous?: { question: string; answer: string },
+    cutInAfterMs?: number,
+  ): Promise<Understanding | undefined> {
+    const provider = this.provider
+    if (!provider?.understand) return undefined
+    const started = this.now()
+    const request = {
+      question,
+      heard,
+      ...(card?.screen ? { card: card.screen } : {}),
+      ...(card?.question !== undefined ? { questionNo: card.question } : {}),
+      ...(previous ? { previous } : {}),
+      ...(cutInAfterMs !== undefined ? { cutInAfterMs } : {}),
+    }
+    const understood = refineUnderstanding(await provider.understand(request, signal), request)
+    this.deps.log?.timing({ what: 'understood', ms: this.now() - started, kind: understood?.kind ?? 'none', heard, answer: understood?.answer ?? '' })
+    return understood
+  }
+
+  private clipFor(text: string): Buffer | undefined {
+    return this.deps.clips?.get(text)
   }
 
   private warmClips(provider: VoiceProvider) {
     const clips = this.deps.clips
     const cueText = this.deps.thinkingCue && !this.deps.thinkingCue.pcm ? this.deps.thinkingCue.text : undefined
-    const texts = [...(this.deps.acknowledgements ?? []), ...(cueText ? [cueText] : [])]
+    // The fixed confirmations ("ใช่ค่ะ", "ข้อสองนะคะ", "ขอโทษค่ะ ได้ยินไม่ชัด…") when replies are checked.
+    const texts = [...(this.deps.acknowledgements ?? []), ...(cueText ? [cueText] : []), ...(provider.understand ? ECHO_CLIPS : [])]
     if (!clips || !texts.length) return
     clips.warm(texts, t => provider.synthesize(t)).catch(err => this.warn(`Acknowledgement clips not ready: ${(err as Error).message}`))
   }
@@ -879,6 +1024,10 @@ export class VoiceSession {
     this.deps.log?.line(line)
     this.changed()
     return line
+  }
+
+  private lastUserLineId(): number {
+    return this.lines.findLast(l => l.who === 'user')?.id ?? -1
   }
 
   private markLine(id: number, patch: Partial<TranscriptLine>) {

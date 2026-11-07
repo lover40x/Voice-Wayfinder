@@ -40634,6 +40634,164 @@ var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
 var wrapper_default = import_websocket.default;
 
+// bridge/src/understand.ts
+var INSTRUCTIONS = `You check a spoken reply in a Thai voice conversation before the conversation moves on.
+You get the question that was asked aloud, its on-screen card (numbered choices, a recommendation) when there is one, and what Thai speech recognition heard. Recognition often mishears short words: "\u0E43\u0E0A\u0E48" can come out as "\u0E44\u0E17\u0E22", "\u0E44\u0E09\u0E48", "\u0E43\u0E2B\u0E49" or "\u0E44\u0E2E"; numbers and English terms can be garbled. Noise (a cough, water, a door, other people talking) can come out as random Thai words.
+
+Classify the reply:
+- "answer": it answers the question: a choice by number or words ("\u0E02\u0E49\u0E2D\u0E2A\u0E2D\u0E07", "\u0E2D\u0E31\u0E19\u0E41\u0E23\u0E01", "2"), yes or no to a yes/no question or to the recommendation ("\u0E43\u0E0A\u0E48", "\u0E44\u0E14\u0E49", "\u0E42\u0E2D\u0E40\u0E04", "\u0E44\u0E21\u0E48"), or a free answer that fits the question. A likely mishearing of a short yes counts as yes only when the question is a yes/no question.
+- "repeat": they ask to hear the question again or did not catch it ("\u0E1F\u0E31\u0E07\u0E44\u0E21\u0E48\u0E17\u0E31\u0E19", "\u0E2D\u0E30\u0E44\u0E23\u0E19\u0E30", "\u0E2D\u0E35\u0E01\u0E17\u0E35"). Saying NOT to repeat ("\u0E44\u0E21\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E16\u0E32\u0E21\u0E43\u0E2B\u0E21\u0E48") is not this.
+- "question": they ask something back or want an explanation before answering ("\u0E2B\u0E21\u0E32\u0E22\u0E16\u0E36\u0E07\u0E2D\u0E30\u0E44\u0E23", "\u0E44\u0E21\u0E48\u0E04\u0E48\u0E2D\u0E22\u0E40\u0E02\u0E49\u0E32\u0E43\u0E08").
+- "comment": they say something on another subject, change the plan, or complain.
+- "unclear": noise, words unrelated to the question, or too garbled to tell what they meant.
+- "correction": they say the previous answer was heard wrong or want to change it ("\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E01\u0E35\u0E49\u0E1A\u0E2D\u0E01\u0E27\u0E48\u0E32\u0E43\u0E0A\u0E48", "\u0E1F\u0E31\u0E07\u0E1C\u0E34\u0E14", "\u0E22\u0E49\u0E2D\u0E19\u0E01\u0E25\u0E31\u0E1A\u0E44\u0E1B\u0E02\u0E49\u0E2D\u0E17\u0E35\u0E48\u0E41\u0E25\u0E49\u0E27", "\u0E02\u0E49\u0E2D\u0E17\u0E35\u0E48\u0E41\u0E25\u0E49\u0E27\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48"). Most likely when they cut in right at the start of this question, just after hearing how their last answer was understood, and what they say contradicts it.
+
+Yes and no: "\u0E43\u0E0A\u0E48", "\u0E44\u0E14\u0E49", "\u0E42\u0E2D\u0E40\u0E04", "\u0E16\u0E39\u0E01", "\u0E40\u0E2D\u0E32" and a likely mishearing of "\u0E43\u0E0A\u0E48" are yes; "\u0E44\u0E21\u0E48", "\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48", "\u0E44\u0E21\u0E48\u0E40\u0E2D\u0E32" are no. Yes always agrees with the question exactly as it was asked, including any negative words inside it: to "\u0E41\u0E17\u0E19\u0E17\u0E35\u0E48\u0E40\u0E25\u0E22\u0E42\u0E14\u0E22\u0E44\u0E21\u0E48\u0E16\u0E32\u0E21 Jev \u0E43\u0E0A\u0E48\u0E44\u0E2B\u0E21\u0E04\u0E30", "\u0E43\u0E0A\u0E48" means replace without asking Jev. Never turn a yes into a no. Extra words after a yes ("\u0E43\u0E0A\u0E48 \u0E44\u0E21\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E16\u0E32\u0E21\u0E43\u0E2B\u0E21\u0E48", "\u0E44\u0E14\u0E49 \u0E44\u0E21\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E17\u0E27\u0E19") keep it a yes.
+
+answer: for "answer", the answer in a few words: "yes" or "no" for a yes/no question, the choice number first for a choice ("2. withdrawn"), else the gist; for "question" or "comment", what they said in a few words; else "".
+echo: for "answer", a very short polite Thai confirmation of what you understood, 2 to 6 words: "\u0E43\u0E0A\u0E48\u0E04\u0E48\u0E30" or "\u0E44\u0E14\u0E49\u0E04\u0E48\u0E30" for yes, "\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E19\u0E30\u0E04\u0E30" for no, "\u0E02\u0E49\u0E2D\u0E2A\u0E2D\u0E07\u0E19\u0E30\u0E04\u0E30" for a choice, "\u0E43\u0E0A\u0E49 withdrawn \u0E19\u0E30\u0E04\u0E30" for a free answer; else "".`;
+var SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["kind", "answer", "echo"],
+  properties: {
+    kind: { type: "string", enum: ["answer", "unclear", "repeat", "question", "comment", "correction"] },
+    answer: { type: "string" },
+    echo: { type: "string" }
+  }
+};
+var MISHEARD_YES = /^(ไทย|ไท|ไฮ|ไฉ่|ใฉ่|ฉ่าย|ชัย|ไช|ไช่|ใช้)(ค่ะ|คะ|ครับ|จ้ะ|จ้า)?[.!]?$/;
+function normaliseHeard(heard) {
+  const t = heard.trim();
+  return MISHEARD_YES.test(t) ? "\u0E43\u0E0A\u0E48" : t;
+}
+function userMessage(r) {
+  return [
+    ...r.previous ? [`Previous question: ${r.previous.question}
+Its answer was understood (and confirmed aloud) as: ${r.previous.answer}`] : [],
+    `Question asked: ${r.question}`,
+    r.card ? `On-screen card:
+${r.card}` : "No on-screen card.",
+    ...r.cutInAfterMs !== void 0 ? [`They spoke over this question ${(r.cutInAfterMs / 1e3).toFixed(1)} s after it began.`] : [],
+    `Heard: ${normaliseHeard(r.heard)}`
+  ].join("\n\n");
+}
+function parseUnderstanding(text2) {
+  try {
+    const v = JSON.parse(text2);
+    const kinds = ["answer", "unclear", "repeat", "question", "comment", "correction"];
+    if (!v || typeof v !== "object" || !kinds.includes(v.kind)) return void 0;
+    return { kind: v.kind, answer: typeof v.answer === "string" ? v.answer : "", echo: typeof v.echo === "string" ? v.echo.slice(0, 80) : "" };
+  } catch {
+    return void 0;
+  }
+}
+var THAI_NUMBERS = ["\u0E28\u0E39\u0E19\u0E22\u0E4C", "\u0E2B\u0E19\u0E36\u0E48\u0E07", "\u0E2A\u0E2D\u0E07", "\u0E2A\u0E32\u0E21", "\u0E2A\u0E35\u0E48", "\u0E2B\u0E49\u0E32", "\u0E2B\u0E01", "\u0E40\u0E08\u0E47\u0E14", "\u0E41\u0E1B\u0E14", "\u0E40\u0E01\u0E49\u0E32", "\u0E2A\u0E34\u0E1A"];
+var ECHO = {
+  yes: "\u0E43\u0E0A\u0E48\u0E04\u0E48\u0E30",
+  no: "\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E19\u0E30\u0E04\u0E30",
+  choice: (n) => n >= 1 && n <= 10 ? `\u0E02\u0E49\u0E2D${THAI_NUMBERS[n]}\u0E19\u0E30\u0E04\u0E30` : "\u0E04\u0E48\u0E30",
+  /** Noise or garbled words: asked once more, without reading the question again. */
+  unclear: "\u0E02\u0E2D\u0E42\u0E17\u0E29\u0E04\u0E48\u0E30 \u0E44\u0E14\u0E49\u0E22\u0E34\u0E19\u0E44\u0E21\u0E48\u0E0A\u0E31\u0E14 \u0E1E\u0E39\u0E14\u0E2D\u0E35\u0E01\u0E17\u0E35\u0E44\u0E14\u0E49\u0E44\u0E2B\u0E21\u0E04\u0E30",
+  /** They say the last answer was misheard: the round goes back to it. */
+  correction: "\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E01\u0E35\u0E49\u0E19\u0E48\u0E32\u0E08\u0E30\u0E1F\u0E31\u0E07\u0E1C\u0E34\u0E14\u0E04\u0E48\u0E30 \u0E07\u0E31\u0E49\u0E19\u0E40\u0E23\u0E32\u0E01\u0E25\u0E31\u0E1A\u0E44\u0E1B\u0E02\u0E49\u0E2D\u0E01\u0E48\u0E2D\u0E19\u0E2B\u0E19\u0E49\u0E32\u0E2D\u0E35\u0E01\u0E04\u0E23\u0E31\u0E49\u0E07\u0E19\u0E30\u0E04\u0E30"
+};
+var ECHO_CLIPS = [ECHO.yes, ECHO.no, ECHO.unclear, ECHO.correction, ...Array.from({ length: 8 }, (_, i) => ECHO.choice(i + 1))];
+var KINDS = [
+  ["yes", 'Yes: agrees with the question exactly as it was asked (\u0E43\u0E0A\u0E48, \u0E44\u0E14\u0E49, \u0E42\u0E2D\u0E40\u0E04, \u0E16\u0E39\u0E01, \u0E40\u0E2D\u0E32), even with extra words after it ("\u0E43\u0E0A\u0E48 \u0E44\u0E21\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E16\u0E32\u0E21\u0E43\u0E2B\u0E21\u0E48"). Negative words inside the question ("\u0E42\u0E14\u0E22\u0E44\u0E21\u0E48\u0E16\u0E32\u0E21 Jev") do not flip it.'],
+  ["no", "No: disagrees (\u0E44\u0E21\u0E48, \u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48, \u0E44\u0E21\u0E48\u0E40\u0E2D\u0E32)."],
+  ["choice", "Picks one of the numbered choices on the card, by number or by its words (\u0E02\u0E49\u0E2D\u0E2A\u0E2D\u0E07, \u0E2D\u0E31\u0E19\u0E41\u0E23\u0E01, 2)."],
+  ["free_answer", "Another answer that fits the question."],
+  ["repeat", "Asks to hear the question again or did not catch it (\u0E1F\u0E31\u0E07\u0E44\u0E21\u0E48\u0E17\u0E31\u0E19, \u0E2D\u0E30\u0E44\u0E23\u0E19\u0E30, \u0E2D\u0E35\u0E01\u0E17\u0E35). Saying NOT to repeat is not this."],
+  ["question", "Asks something back or wants an explanation before answering (\u0E2B\u0E21\u0E32\u0E22\u0E16\u0E36\u0E07\u0E2D\u0E30\u0E44\u0E23, \u0E44\u0E21\u0E48\u0E04\u0E48\u0E2D\u0E22\u0E40\u0E02\u0E49\u0E32\u0E43\u0E08)."],
+  ["comment", "Talks about something else, changes the plan, or complains."],
+  ["unclear", "Noise, words unrelated to the question, or too garbled to tell what they meant (recognition turns noise into random Thai words)."],
+  [
+    "correction",
+    "Says the PREVIOUS answer was heard wrong or wants to change it (\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E01\u0E35\u0E49\u0E1A\u0E2D\u0E01\u0E27\u0E48\u0E32\u0E43\u0E0A\u0E48, \u0E1F\u0E31\u0E07\u0E1C\u0E34\u0E14, \u0E22\u0E49\u0E2D\u0E19\u0E01\u0E25\u0E31\u0E1A\u0E44\u0E1B\u0E02\u0E49\u0E2D\u0E17\u0E35\u0E48\u0E41\u0E25\u0E49\u0E27, \u0E02\u0E49\u0E2D\u0E17\u0E35\u0E48\u0E41\u0E25\u0E49\u0E27\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48). Most likely when they cut in right at the start of this question, just after hearing how their last answer was understood, and what they say contradicts it."
+  ]
+];
+function cardChoices(card, questionNo) {
+  if (!card) return [];
+  let section = card;
+  if (questionNo !== void 0) {
+    const parts = card.split(/(?=\bQ\d+\b)/);
+    section = parts.find((p) => new RegExp(`^Q${questionNo}\\b`).test(p)) ?? (parts.length > 1 ? "" : card);
+  }
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const m of section.matchAll(/^\s*(?:[-*]\s*)?\**(\d{1,2})[.)]\**\s+(.+)$/gm)) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({ value: m[1], description: m[2].trim().slice(0, 300) });
+  }
+  return out;
+}
+function decisionsRequest(model, r) {
+  const choices = cardChoices(r.card, r.questionNo);
+  const questions = [
+    {
+      type: "choice",
+      name: "kind",
+      instructions: "A Thai voice conversation asked the question below aloud, and Thai speech recognition heard the reply. Recognition often mishears short words and turns noise into random words. What kind of reply is it?",
+      choices: KINDS.map(([value, description]) => ({ value, description }))
+    }
+  ];
+  if (choices.length >= 2) {
+    questions.push({
+      type: "choice",
+      name: "which",
+      instructions: "If the reply picks one of the numbered choices on the card, or says yes to the recommended one, which is it?",
+      choices: [...choices, { value: "none", description: "It picks none of them." }]
+    });
+  }
+  return { model, input: userMessage(r), questions };
+}
+var MIN_ANSWER_CONFIDENCE = 0.4;
+function readDecisions(answers, r, minConfidence = MIN_ANSWER_CONFIDENCE) {
+  const k = answers.find((a) => a.name === "kind" && a.type === "choice");
+  const kind = k?.choice;
+  if (typeof kind !== "string") return void 0;
+  const unsure = typeof k?.confidence === "number" && k.confidence < minConfidence && !YES_NO_START.test(r.heard.trim());
+  if (unsure && (kind === "yes" || kind === "no" || kind === "choice" || kind === "free_answer")) return { kind: "unclear", answer: "", echo: "" };
+  const which = answers.find((a) => a.name === "which" && a.type === "choice")?.choice;
+  const picked = typeof which === "string" && which !== "none" ? cardChoices(r.card, r.questionNo).find((c) => c.value === which) : void 0;
+  const n = picked ? Number(picked.value) : void 0;
+  switch (kind) {
+    case "yes":
+      return { kind: "answer", answer: picked ? `yes (${picked.value}. ${picked.description})` : "yes", echo: ECHO.yes };
+    case "no":
+      return { kind: "answer", answer: "no", echo: ECHO.no };
+    case "choice":
+      return picked ? { kind: "answer", answer: `${picked.value}. ${picked.description}`, echo: ECHO.choice(n) } : { kind: "answer", answer: r.heard, echo: "" };
+    case "free_answer":
+      return { kind: "answer", answer: r.heard, echo: "" };
+    case "repeat":
+    case "unclear":
+      return { kind, answer: "", echo: "" };
+    case "question":
+    case "comment":
+      return { kind, answer: r.heard, echo: "" };
+    case "correction":
+      return r.previous ? { kind, answer: r.heard, echo: "" } : { kind: "comment", answer: r.heard, echo: "" };
+    default:
+      return void 0;
+  }
+}
+var YES_NO_START = /^(ใช่|ไม่ใช่|ได้|ไม่ได้|โอเค|ok|okay|ไม่|เอา|ไม่เอา|ถูก|ไม่ถูก|yes|no)(?![ก-๙])|^(ใช่|ไม่ใช่|ได้|ไม่ได้|ไม่|ถูก)(ค่ะ|คะ|ครับ|ๆ|นะ)/i;
+var BACK = /เมื่อกี้|เมื่อกี๊|ข้อที่แล้ว|ข้อก่อน|ข้อเมื่อกี้|ฟังผิด|ได้ยินผิด|ย้อนกลับ|ย้อนไป|กลับไปข้อ|แก้ข้อ|แก้คำตอบ|เปลี่ยนคำตอบ|previous|go back/i;
+var EARLY_CUT_IN_MS = 1500;
+function refineUnderstanding(u, r) {
+  if (!r.previous) return u;
+  const heard = r.heard.trim();
+  if (BACK.test(heard)) return { kind: "correction", answer: heard, echo: "" };
+  if (u && r.cutInAfterMs !== void 0 && r.cutInAfterMs < EARLY_CUT_IN_MS) {
+    if (u.kind === "answer" && /^no\b/.test(u.answer)) return { kind: "correction", answer: heard, echo: "" };
+    if (u.kind === "answer" && /^yes\b/.test(u.answer)) return { kind: "repeat", answer: "", echo: "" };
+  }
+  return u;
+}
+
 // bridge/src/providers/openai-realtime.ts
 var URL2 = "wss://api.openai.com/v1/realtime";
 var DEFAULT_INSTRUCTIONS = [
@@ -40725,6 +40883,62 @@ var OpenAIRealtimeProvider = class {
       this.speeches.set(speechId, { speechId, cancelRequested: false, clip: { chunks: [], resolve: resolve2, reject } });
       this.requestSpeech(speechId, text2);
     });
+  }
+  /** One Responses API call with a strict JSON schema; undefined on any failure or timeout. */
+  async understand(request, signal) {
+    const u = this.cfg.understanding;
+    if (!u?.enabled) return void 0;
+    const timeout = AbortSignal.timeout(u.timeoutMs);
+    if ((u.api ?? "decisions") === "decisions") return this.decide(request, signal ? AbortSignal.any([signal, timeout]) : timeout);
+    try {
+      const res = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: u.model,
+          instructions: INSTRUCTIONS,
+          input: userMessage(request),
+          .../^(gpt-5|o\d)/.test(u.model) ? { reasoning: { effort: "minimal" } } : { temperature: 0 },
+          text: { format: { type: "json_schema", name: "understanding", strict: true, schema: SCHEMA } },
+          max_output_tokens: 300,
+          store: false
+        }),
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout
+      });
+      if (!res.ok) return void 0;
+      const body = await res.json();
+      const tokensIn = body.usage?.input_tokens ?? 0;
+      const tokensOut = body.usage?.output_tokens ?? 0;
+      if (tokensIn || tokensOut) {
+        this.emit({ type: "usage", kind: "understanding", costUsd: (tokensIn * u.pricingUsd.inPerMTok + tokensOut * u.pricingUsd.outPerMTok) / 1e6 });
+      }
+      const text2 = body.output?.flatMap((o) => o.content ?? []).find((c) => c.type === "output_text")?.text;
+      return text2 ? parseUnderstanding(text2) : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  /** The Decisions API: typed answers, about 0.3 s, input tokens only. */
+  async decide(request, signal) {
+    const u = this.cfg.understanding;
+    try {
+      const res = await fetch("https://api.openai.com/v1/decisions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify(decisionsRequest(u.model, request)),
+        signal
+      });
+      if (!res.ok) return void 0;
+      const body = await res.json();
+      const tokensIn = body.usage?.input_tokens ?? 0;
+      const tokensOut = body.usage?.output_tokens ?? 0;
+      if (tokensIn || tokensOut) {
+        this.emit({ type: "usage", kind: "understanding", costUsd: (tokensIn * u.pricingUsd.inPerMTok + tokensOut * u.pricingUsd.outPerMTok) / 1e6 });
+      }
+      return body.answers ? readDecisions(body.answers, request, u.minConfidence) : void 0;
+    } catch {
+      return void 0;
+    }
   }
   requestSpeech(speechId, text2, extra = "") {
     this.send({
@@ -40979,19 +41193,29 @@ import { randomUUID } from "node:crypto";
 var PROTOCOL_VERSION = 1;
 
 // bridge/src/session.ts
+function describeTaken(a) {
+  const u = a.understood;
+  if (!u || u.kind !== "answer") return a.answer;
+  return `${u.answer}${u.echo ? ` (confirmed aloud: "${u.echo}")` : ""}`;
+}
 var STOPPED = "The person ended voice mode (End). Continue in text and make no more voice calls until they start voice mode again.";
 var BYTES_PER_MS = 48;
 var MAX_LINES = 200;
 var MAX_REPEATS = 3;
+var MAX_UNCLEAR = 2;
+var MAX_CORRECTIONS = 3;
 var REPEAT = /ฟังไม่ทัน|ไม่ได้ยิน|ได้ยินไม่ชัด|ฟังไม่ชัด|อีกที|อีกรอบ|อีกครั้ง|พูดใหม่|ถามใหม่|พูดอีก|พูดซ้ำ|ถามซ้ำ|ทวนคำถาม|ทวนอีก|ทวนหน่อย|ทวนให้|อะไรนะ|ว่าไงนะ|ว่าอะไรนะ|พูดช้า|ช้าๆ|\brepeat\b|\bagain\b|\bpardon\b|say that|didn'?t catch/i;
+var NOT_REPEAT = /ไม่ต้อง|ไม่เป็นไร|อย่า|ทำไม|พอแล้ว|เข้าใจแล้ว|ได้ยินแล้ว|\b(don'?t|no need|why|stop)\b/i;
+var ANSWER = /(^|\s)(ใช่|ไม่ใช่|ได้|ไม่ได้|โอเค|ok|okay|ตกลง|ถูก|ถูกต้อง|yes|no)(ค่ะ|คะ|ครับ|จ้ะ|จ้า|นะ)?($|\s)|ข้อ\s*(หนึ่ง|สอง|สาม|สี่|ห้า|แรก|\d)|\d/i;
 function isRepeatRequest(text2) {
   const t = text2.trim();
-  return t.length > 0 && t.length <= 40 && REPEAT.test(t);
+  if (!t || t.length > 40 || !REPEAT.test(t)) return false;
+  return !NOT_REPEAT.test(t) && !ANSWER.test(t);
 }
 var round = (usdValue) => Math.round(usdValue * 1e3) / 1e3;
 var usd = (n) => n > 0 && n < 5e-3 ? "<$0.01" : `$${n.toFixed(2)}`;
 var minutes = (ms) => ms < 6e4 ? `${Math.max(1, Math.round(ms / 1e3))} s` : `${(ms / 6e4).toFixed(1)} min`;
-var describeCost = (c) => `${minutes(c.durationMs)}, ${usd(c.costUsd)} (Claude's speech ${usd(c.speechUsd)} for ${minutes(c.spokenMs)}, transcription ${usd(c.transcriptionUsd)} for ${minutes(c.heardMs)})`;
+var describeCost = (c) => `${minutes(c.durationMs)}, ${usd(c.costUsd)} (Claude's speech ${usd(c.speechUsd)} for ${minutes(c.spokenMs)}, transcription ${usd(c.transcriptionUsd)} for ${minutes(c.heardMs)}${c.understandingUsd ? `, understanding ${usd(c.understandingUsd)}` : ""})`;
 var VoiceSession = class {
   provider;
   audio;
@@ -41016,6 +41240,8 @@ var VoiceSession = class {
    * voice call waits; Resume picks up where it was, the interrupted line again.
    */
   paused = false;
+  /** The last answer taken and how it was understood: what a "that was wrong" refers to. */
+  lastAnswer;
   pausedAt = 0;
   /** How long the last pause was, while Claude still owes the person a recap of where things stand. */
   recapDue;
@@ -41026,7 +41252,7 @@ var VoiceSession = class {
   nextLineId = 1;
   card;
   rev = 1;
-  spend = { speech: 0, transcription: 0 };
+  spend = { speech: 0, transcription: 0, understanding: 0 };
   spokenMs = 0;
   heardMs = 0;
   lastSession;
@@ -41140,13 +41366,14 @@ var VoiceSession = class {
     if (this.stopped) return { said: { status: "ended", spokenMs: 0, detail: STOPPED }, heardBefore: [], reply: { status: "ended", text: "", parts: [] }, repeats: 0 };
     await this.ensureConnected();
     const heardBefore = this.queue.splice(0).map((u) => u.text);
-    const { said, reply, repeats } = await this.ask(text2, screen2 ? { screen: screen2 } : void 0, timeoutMs, signal);
+    const { said, reply, repeats, understood } = await this.ask(text2, screen2 ? { screen: screen2 } : void 0, timeoutMs, signal, "", this.lastAnswer);
     if (!reply) {
       if (said.status === "skipped") this.skipRequested = false;
       const pausedMs = said.pausedMs !== void 0 ? { pausedMs: said.pausedMs } : {};
       return { said, heardBefore, reply: { status: said.status === "failed" ? "disconnected" : said.status, text: "", parts: [], ...pausedMs }, repeats };
     }
-    return { said, heardBefore, reply, repeats };
+    if (reply.status === "replied") this.acknowledge(understood?.kind === "answer" ? understood.echo : "");
+    return { said, heardBefore, reply, repeats, ...understood ? { understood } : {} };
   }
   /**
    * Asks a whole round of questions back to back, acknowledging each answer
@@ -41156,26 +41383,62 @@ var VoiceSession = class {
     if (this.stopped) return { heardBefore: [], answers: [], unasked: [...questions], ended: STOPPED };
     await this.ensureConnected();
     const heardBefore = this.queue.splice(0).map((u) => u.text);
-    const answers = [];
-    for (const [i, question] of questions.entries()) {
+    const byIndex = [];
+    const answers = () => byIndex.filter((a) => a !== void 0);
+    let lead = "";
+    let corrections = 0;
+    for (let i = 0; i < questions.length; i++) {
+      const question = questions[i];
       const unasked = () => questions.slice(i + 1);
-      const { said, reply, repeats } = await this.ask(question, { screen: screen2, question: i + 1, of: questions.length }, timeoutMs, signal);
+      const before = i > 0 ? byIndex[i - 1] : void 0;
+      const previous = before ? { question: before.question, answer: describeTaken(before) } : this.lastAnswer;
+      const { said, reply, repeats, understood } = await this.ask(question, { screen: screen2, question: i + 1, of: questions.length }, timeoutMs, signal, lead, previous);
+      lead = "";
       if (said.status === "skipped") {
         this.skipRequested = false;
-        answers.push({ question, status: "skipped", answer: "", interrupted: false, repeats });
+        byIndex[i] = { question, status: "skipped", answer: "", interrupted: false, repeats };
         continue;
       }
       if (!reply) {
         const status = said.status === "failed" ? "disconnected" : said.status === "ended" ? "ended" : said.status === "resumed" ? "resumed" : "cancelled";
-        answers.push({ question, status, answer: "", interrupted: false, repeats, ...said.pausedMs !== void 0 ? { pausedMs: said.pausedMs } : {} });
-        return { heardBefore, answers, unasked: unasked() };
+        byIndex[i] = { question, status, answer: "", interrupted: false, repeats, ...said.pausedMs !== void 0 ? { pausedMs: said.pausedMs } : {} };
+        return { heardBefore, answers: answers(), unasked: unasked() };
       }
-      answers.push({ question, status: reply.status, answer: reply.text, interrupted: said.status === "interrupted", repeats, ...reply.pausedMs !== void 0 ? { pausedMs: reply.pausedMs } : {} });
+      if (understood?.kind === "correction" && i > 0 && corrections < MAX_CORRECTIONS) {
+        corrections++;
+        this.deps.log?.timing({ what: "correction", from: i + 1, heard: reply.text });
+        byIndex[i - 1] = void 0;
+        this.lastAnswer = void 0;
+        const clip = this.clipFor(ECHO.correction);
+        if (clip) {
+          this.addLine("claude", ECHO.correction);
+          this.playPcm(clip, ECHO.correction);
+        } else lead = ECHO.correction;
+        i -= 2;
+        continue;
+      }
+      byIndex[i] = {
+        question,
+        status: reply.status,
+        answer: reply.text,
+        interrupted: said.status === "interrupted",
+        repeats,
+        ...reply.pausedMs !== void 0 ? { pausedMs: reply.pausedMs } : {},
+        ...understood ? { understood } : {}
+      };
       if (reply.status === "ended" || reply.status === "cancelled" || reply.status === "disconnected" || reply.status === "resumed") {
-        return { heardBefore, answers, unasked: unasked() };
+        return { heardBefore, answers: answers(), unasked: unasked() };
       }
+      const last = i === questions.length - 1;
+      if (understood && (understood.kind === "question" || understood.kind === "comment" || understood.kind === "correction")) {
+        this.acknowledge();
+        return { heardBefore, answers: answers(), unasked: unasked() };
+      }
+      const echo = understood?.kind === "answer" ? understood.echo : "";
+      if (echo && !last && !this.clipFor(echo)) lead = echo;
+      else this.acknowledge(echo);
     }
-    return { heardBefore, answers, unasked: [] };
+    return { heardBefore, answers: answers(), unasked: [] };
   }
   control(action, text2 = "") {
     const done = (message, accepted = true) => ({ message, accepted });
@@ -41363,7 +41626,7 @@ var VoiceSession = class {
     }
     this.provider = provider;
     this.audio = audio;
-    this.spend = { speech: 0, transcription: 0 };
+    this.spend = { speech: 0, transcription: 0, understanding: 0 };
     this.spokenMs = 0;
     this.heardMs = 0;
     this.startedAt = this.now();
@@ -41395,18 +41658,19 @@ var VoiceSession = class {
       costUsd: round(this.currentCost()),
       speechUsd: round(this.spend.speech),
       transcriptionUsd: round(this.spend.transcription),
+      ...this.spend.understanding ? { understandingUsd: round(this.spend.understanding) } : {},
       spokenMs: this.spokenMs,
       heardMs: this.heardMs
     };
     this.startedAt = void 0;
     this.lastSession = cost;
-    this.spend = { speech: 0, transcription: 0 };
+    this.spend = { speech: 0, transcription: 0, understanding: 0 };
     this.addLine("system", `${reason} OpenAI est.: ${describeCost(cost)}.`);
     this.deps.log?.end(reason, cost);
     this.history = void 0;
   }
   currentCost() {
-    return this.spend.speech + this.spend.transcription;
+    return this.spend.speech + this.spend.transcription + this.spend.understanding;
   }
   /** Today's and this month's spend: ended sessions from the log, plus the one in progress. */
   totals() {
@@ -41567,8 +41831,22 @@ var VoiceSession = class {
     );
   }
   // ---- helpers -------------------------------------------------------------
-  /** Says "heard you" at once, then the thinking cue if Claude takes a while. */
-  acknowledge() {
+  /**
+   * Says "heard you" at once, then the thinking cue if Claude takes a while:
+   * `echo` (what was understood, "ข้อสองนะคะ") when there is one, else a ready clip.
+   */
+  acknowledge(echo = "") {
+    const echoClip = echo ? this.clipFor(echo) : void 0;
+    if (echoClip) {
+      this.addLine("claude", echo);
+      this.playPcm(echoClip, echo);
+      this.startThinkingCue();
+      return;
+    }
+    if (echo) {
+      void this.say(echo).then(() => this.startThinkingCue());
+      return;
+    }
     const clips = this.deps.clips;
     const ready = clips ? (this.deps.acknowledgements ?? []).filter((t) => clips.get(t)) : [];
     if (ready.length) {
@@ -41606,29 +41884,75 @@ var VoiceSession = class {
    * Speaks a question and collects the answer. "I didn't catch that" is no
    * answer: the question is asked again, a little slower, until one comes.
    */
-  async ask(question, card, timeoutMs, signal) {
+  async ask(question, card, timeoutMs, signal, lead = "", previous) {
     let repeats = 0;
-    let text2 = question;
+    let unclear = 0;
+    let text2 = lead ? `${lead} ${question}` : question;
+    let said;
+    let speak = true;
     for (; ; ) {
-      const said = await this.say(text2, signal, card, repeats > 0);
-      if (said.status === "skipped" || said.status === "ended" || said.status === "cancelled" || said.status === "failed") {
-        return { said, repeats, reply: void 0 };
+      if (speak || !said) {
+        said = await this.say(text2, signal, card, repeats > 0);
+        if (said.status === "skipped" || said.status === "ended" || said.status === "cancelled" || said.status === "failed" || said.status === "resumed") {
+          return { said, repeats };
+        }
       }
+      const cutInAfterMs = speak && said.status === "interrupted" ? said.spokenMs : void 0;
+      speak = true;
       const reply = await this.collectReply(timeoutMs, signal);
-      if (reply.status === "replied" && repeats < MAX_REPEATS && isRepeatRequest(reply.text)) {
+      if (reply.status !== "replied") return { said, repeats, reply };
+      const understood = reply.typed ? void 0 : await this.understandReply(question, card, reply.text, signal, previous, cutInAfterMs);
+      const kind = understood?.kind ?? (isRepeatRequest(reply.text) ? "repeat" : "answer");
+      if (kind === "repeat" && repeats < MAX_REPEATS) {
         repeats++;
-        this.deps.log?.timing({ what: "repeat", n: repeats });
+        this.deps.log?.timing({ what: "repeat", n: repeats, heard: reply.text });
         text2 = `\u0E44\u0E14\u0E49\u0E04\u0E48\u0E30 ${question}`;
         continue;
       }
-      if (reply.status === "replied") this.acknowledge();
-      return { said, repeats, reply };
+      if (kind === "unclear" && unclear < MAX_UNCLEAR) {
+        unclear++;
+        this.deps.log?.timing({ what: "unclear", n: unclear, heard: reply.text });
+        this.markLine(this.lastUserLineId(), { unclear: true });
+        const clip = this.clipFor(ECHO.unclear);
+        if (clip) {
+          this.addLine("claude", ECHO.unclear);
+          this.playPcm(clip, ECHO.unclear);
+          speak = false;
+          continue;
+        }
+        text2 = `\u0E02\u0E2D\u0E42\u0E17\u0E29\u0E04\u0E48\u0E30 \u0E44\u0E14\u0E49\u0E22\u0E34\u0E19\u0E44\u0E21\u0E48\u0E0A\u0E31\u0E14 ${question}`;
+        continue;
+      }
+      if (!understood || understood.kind === "answer") {
+        this.lastAnswer = { question, answer: understood ? describeTaken({ answer: reply.text, understood }) : reply.text };
+      }
+      return { said, repeats, reply, ...understood ? { understood } : {} };
     }
+  }
+  /** Asks the provider how the reply reads against the question; undefined when it can't tell (the reply then stands). */
+  async understandReply(question, card, heard, signal, previous, cutInAfterMs) {
+    const provider = this.provider;
+    if (!provider?.understand) return void 0;
+    const started = this.now();
+    const request = {
+      question,
+      heard,
+      ...card?.screen ? { card: card.screen } : {},
+      ...card?.question !== void 0 ? { questionNo: card.question } : {},
+      ...previous ? { previous } : {},
+      ...cutInAfterMs !== void 0 ? { cutInAfterMs } : {}
+    };
+    const understood = refineUnderstanding(await provider.understand(request, signal), request);
+    this.deps.log?.timing({ what: "understood", ms: this.now() - started, kind: understood?.kind ?? "none", heard, answer: understood?.answer ?? "" });
+    return understood;
+  }
+  clipFor(text2) {
+    return this.deps.clips?.get(text2);
   }
   warmClips(provider) {
     const clips = this.deps.clips;
     const cueText = this.deps.thinkingCue && !this.deps.thinkingCue.pcm ? this.deps.thinkingCue.text : void 0;
-    const texts = [...this.deps.acknowledgements ?? [], ...cueText ? [cueText] : []];
+    const texts = [...this.deps.acknowledgements ?? [], ...cueText ? [cueText] : [], ...provider.understand ? ECHO_CLIPS : []];
     if (!clips || !texts.length) return;
     clips.warm(texts, (t) => provider.synthesize(t)).catch((err) => this.warn(`Acknowledgement clips not ready: ${err.message}`));
   }
@@ -41716,6 +42040,9 @@ var VoiceSession = class {
     this.deps.log?.line(line);
     this.changed();
     return line;
+  }
+  lastUserLineId() {
+    return this.lines.findLast((l) => l.who === "user")?.id ?? -1;
   }
   markLine(id, patch) {
     const i = this.lines.findIndex((l) => l.id === id);
@@ -41845,6 +42172,23 @@ async function guarded(extra, run, render) {
     clearInterval(beat);
   }
 }
+var describeUnderstood = (u) => {
+  if (!u) return "";
+  switch (u.kind) {
+    case "answer":
+      return `Understood as: ${u.answer}${u.echo ? ` (confirmed aloud: "${u.echo}")` : ""}.`;
+    case "question":
+      return `They asked back instead of answering (${u.answer}). Answer that first, then ask this question again.`;
+    case "comment":
+      return `They said something else instead of answering (${u.answer}). Respond to it, then come back to this question.`;
+    case "unclear":
+      return "Still not clear after asking again (noise or garbled speech): ask it differently, or confirm what you think they meant.";
+    case "repeat":
+      return "They kept asking to hear it again: ask it shorter and simpler.";
+    case "correction":
+      return `They say their previous answer was heard wrong (${u.answer}). Say "\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E01\u0E35\u0E49\u0E19\u0E48\u0E32\u0E08\u0E30\u0E1F\u0E31\u0E07\u0E1C\u0E34\u0E14\u0E04\u0E48\u0E30", ask that previous question again, fix it in your notes, then come back to this one.`;
+  }
+};
 var minutesSaid = (ms = 0) => ms < 9e4 ? `${Math.round(ms / 1e3)} s` : `${Math.round(ms / 6e4)} min`;
 var describeSay = (r) => {
   switch (r.status) {
@@ -41926,6 +42270,8 @@ server.registerTool(
       if (r.repeats) lines.push(`The person asked to hear the question again; it was repeated ${r.repeats} time(s) before this answer.`);
       if (r.said.status !== "completed") lines.push(describeSay(r.said));
       if (r.said.status === "completed" || r.said.status === "interrupted") lines.push(describeReply(r.reply));
+      const understood = describeUnderstood(r.understood);
+      if (understood) lines.push(understood);
       return text(lines.join("\n"), r);
     }
   )
@@ -41953,8 +42299,10 @@ server.registerTool(
       r.answers.forEach((a, i) => {
         const heard = a.status === "replied" ? a.answer : `(${describeReply({ status: a.status, text: a.answer, parts: [], pausedMs: a.pausedMs })})`;
         const notes = [a.interrupted && "they cut in while it was being asked", a.repeats && `asked to hear it again, repeated ${a.repeats}\xD7`].filter(Boolean);
+        const understood = describeUnderstood(a.understood);
         lines.push(`Q${i + 1}: ${a.question}
-A${i + 1}${notes.length ? ` (${notes.join("; ")})` : ""}: ${heard}`);
+A${i + 1}${notes.length ? ` (${notes.join("; ")})` : ""}: ${heard}${understood ? `
+${understood}` : ""}`);
       });
       if (r.unasked.length) lines.push(`Not asked: ${r.unasked.join(" | ")}`);
       lines.push("Answers are Thai speech, transcribed; English terms may be misheard.");
