@@ -41830,6 +41830,7 @@ var VoiceSession = class {
       awaitingReply: this.awaiting,
       provider: this.provider?.name ?? "openai-realtime",
       model: this.provider?.model ?? "",
+      ...this.deps.models ? { models: this.deps.models } : {},
       sessionStartedAt: this.startedAt,
       estimatedCostUsd: round(this.currentCost()),
       lastSession: this.lastSession,
@@ -42455,7 +42456,13 @@ var session = new VoiceSession({
   clips: new ClipCache(defaultClipDir(), [cfg.openai.model, cfg.openai.voice, cfg.openai.speed, cfg.openai.instructions ?? DEFAULT_INSTRUCTIONS].join("|")),
   idleDisconnectMs: cfg.session.idleDisconnectMin * 6e4,
   refreshAfterMs: cfg.session.refreshAfterMin * 6e4,
-  baseVocabulary: cfg.vocabulary
+  baseVocabulary: cfg.vocabulary,
+  models: {
+    speech: cfg.openai.model,
+    voice: cfg.openai.voice,
+    transcription: cfg.openai.transcription.model,
+    ...cfg.openai.understanding?.enabled !== false && cfg.openai.understanding?.model ? { understanding: cfg.openai.understanding.model } : {}
+  }
 });
 void checkClaudeCodeVersion().then((w) => w && session.warn(w));
 var server = new McpServer({ name: "voice-wayfinder", version: VERSION });

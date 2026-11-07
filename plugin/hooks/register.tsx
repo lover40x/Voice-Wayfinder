@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, McpToolResult, Register } from 'claude-code'
 
-import type { BridgeLink, RoundItem, TranscriptLine, VoiceActivity, VoiceControlAction, VoiceStateUnchanged, VoiceStateV1 } from '../types'
+import type { BridgeLink, RoundItem, TranscriptLine, VoiceActivity, VoiceControlAction, VoiceModels, VoiceStateUnchanged, VoiceStateV1 } from '../types'
 
 const PANE = 'voice-pane'
 const TITLE = 'Voice'
@@ -400,7 +400,10 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = ui
+    // Graphical surfaces draw the status as an animated icon; the terminal keeps its glyphs.
+    const Svg = e.surface !== 'terminal' && 'Svg' in ui ? ui.Svg : undefined
     const s = await read($, voice)
     const l = await read($, link)
     const n = await read($, tick)
@@ -411,27 +414,46 @@ export const register: Register = on => {
     const answer = s?.transcript.findLast(line => line.who === 'user' && (!asking || line.id > asking.id))
     const inQuestion = s !== null && (s.activity === 'speaking' || s.awaitingReply)
     const card = s?.card
+    const models = s?.models
+    const heading = (text: string, hint?: string) => (
+      <Text size="footnote" weight="semibold" dimColor>
+        {text}
+        {hint ? <Text weight="regular"> · {hint}</Text> : ''}
+      </Text>
+    )
 
     return (
-      <Box flexDirection="column" gap={1}>
-        <Box flexDirection="column">
-          <Text>
-            <Text bold color={a.color}>
-              {glyph(activity, n)} {a.label}
-            </Text>
-            {s?.sessionStartedAt !== undefined ? <Text dimColor> · since {clock(s.sessionStartedAt)} · est. {usd(s.estimatedCostUsd)}</Text> : ''}
-          </Text>
-          {s?.sessionStartedAt === undefined && s?.lastSession && (
-            <Text dimColor>
-              Last session: {minutes(s.lastSession.durationMs)} · est. {usd(s.lastSession.costUsd)} (speech {usd(s.lastSession.speechUsd)} ·
-              transcription {usd(s.lastSession.transcriptionUsd)})
-            </Text>
-          )}
-          {s?.todayCostUsd !== undefined && (
-            <Text dimColor>
-              OpenAI est. today {usd(s.todayCostUsd)} · this month {usd(s.monthCostUsd ?? 0)}
-            </Text>
-          )}
+      <Box flexDirection="column" gap="md">
+        <Box key="head" flexDirection="column" gap="xs">
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+            <Box flexDirection="row" alignItems="center" gap="sm">
+              {Svg && <Svg key={`status-${activity}`} source={statusIcon(activity)} alt={a.label} width={24} height={18} />}
+              <Text size="heading" weight="semibold" color={a.color}>
+                {Svg ? '' : `${glyph(activity, n)} `}
+                {a.label}
+              </Text>
+            </Box>
+            {s?.sessionStartedAt !== undefined && (
+              <Text size="footnote" dimColor tabular>
+                since {clock(s.sessionStartedAt)} · est. {usd(s.estimatedCostUsd)}
+              </Text>
+            )}
+          </Box>
+          {models &&
+            (Svg ? (
+              <Box key="models" flexDirection="row" flexWrap="wrap" gap="xs">
+                {modelChips(models).map(([role, name]) => (
+                  <Box key={`model-${role}`} borderStyle="round" borderDimColor paddingX={1}>
+                    <Text size="caption">
+                      <Text dimColor>{role} </Text>
+                      <Text mono>{name}</Text>
+                    </Text>
+                  </Box>
+                ))}
+              </Box>
+            ) : (
+              <Text dimColor>{modelChips(models).map(([role, name]) => `${role} ${name}`).join(' · ')}</Text>
+            ))}
           {l.status !== 'ok' && l.status !== 'connecting' && <Text color="warning">{l.message ?? 'The voice bridge is not reachable.'}</Text>}
           {s?.error && <Text color="error">{s.error}</Text>}
           {s?.warning && <Text color="warning">{s.warning}</Text>}
@@ -443,18 +465,18 @@ export const register: Register = on => {
         </Box>
 
         {live && (card?.screen || asking) && (
-          <Box key="card" flexDirection="column" borderStyle="round" borderColor={CLAUDE} paddingX={1}>
+          <Box key="card" flexDirection="column" gap="xs" borderStyle="round" borderColor={CLAUDE} paddingX={1} paddingY={Svg ? 'xs' : 0}>
             {card?.question !== undefined && (
-              <Text dimColor>
+              <Text size="caption" weight="semibold" color={CLAUDE}>
                 Question {card.question} of {card.of}
               </Text>
             )}
-            {card?.screen ? <Markdown key="screen" text={card.screen} /> : <Text bold>{asking?.text}</Text>}
+            {card?.screen ? <Markdown key="screen" text={card.screen} /> : <Text weight="semibold">{asking?.text}</Text>}
           </Box>
         )}
 
         {live && (
-          <Box key="live" flexDirection="column">
+          <Box key="live" flexDirection="column" gap="xs">
             {card?.screen && asking && (
               <Text dimColor={s.activity !== 'speaking'}>
                 <Text bold color={CLAUDE}>
@@ -481,52 +503,74 @@ export const register: Register = on => {
               ''
             )}
             {s.activity === 'paused' ? (
-              <Text dimColor>Paused: the mic is off and Claude waits. Resume picks up where it stopped.</Text>
+              <Text size="caption" dimColor>
+                Paused: the mic is off and Claude waits. Resume picks up where it stopped.
+              </Text>
             ) : (
-              inQuestion && <Text dimColor>Speak, or type in the chat box (a choice number works).</Text>
+              inQuestion && (
+                <Text size="caption" dimColor>
+                  Speak, or type in the chat box (a choice number works).
+                </Text>
+              )
             )}
           </Box>
         )}
 
         {live && (
-          <Box key="controls" flexDirection="row" gap={1}>
-            <Button key="pause" onPress={() => void control($, s.activity === 'paused' ? 'resume' : 'pause')}>
+          <Box key="controls" flexDirection="row" flexWrap="wrap" gap="xs">
+            <Button
+              key="pause"
+              variant={s.activity === 'paused' ? 'primary' : 'secondary'}
+              onPress={() => void control($, s.activity === 'paused' ? 'resume' : 'pause')}
+            >
               {s.activity === 'paused' ? '▶ Resume' : '⏸ Pause'}
             </Button>
-            <Button key="mute" onPress={() => void control($, s.muted ? 'unmute' : 'mute')}>
+            <Button key="mute" variant={s.muted ? 'primary' : 'secondary'} onPress={() => void control($, s.muted ? 'unmute' : 'mute')}>
               {s.muted ? '🎙 Unmute' : '🔇 Mute'}
             </Button>
-            <Button key="skip" onPress={() => void control($, 'skip')}>
+            <Button key="skip" variant="secondary" onPress={() => void control($, 'skip')}>
               ⏭ Skip
             </Button>
-            <Button key="end" onPress={() => void control($, 'end')}>
+            <Button key="end" variant="secondary" onPress={() => void control($, 'end')}>
               ⏹ End
             </Button>
           </Box>
         )}
 
         {live && s.round && (
-          <Box key="round" flexDirection="column">
-            <Text bold>
-              Questions <Text dimColor>{s.round.active ? '· click one to go to it' : '· click one to go back to it'}</Text>
-            </Text>
-            {s.round.items.map((item, k) => (
-              <Button key={`q-${k + 1}`} onPress={() => void control($, 'goto', k + 1)}>
-                {roundLabel(item, k + 1, s.round?.active === true && s.round.current === k)}
-              </Button>
-            ))}
-            {s.revisitDue !== undefined && <Text dimColor>Question {s.revisitDue} goes to Claude to revisit next.</Text>}
+          <Box key="round" flexDirection="column" gap="xs">
+            {heading('Questions', s.round.active ? 'click one to go to it' : 'click one to go back to it')}
+            {s.round.items.map((item, k) => {
+              const current = s.round?.active === true && s.round.current === k
+              return (
+                <Button
+                  key={`q-${k + 1}`}
+                  {...(current ? { variant: 'primary' as const } : {})}
+                  {...(item.status === 'answered' && !current ? { dimColor: true } : {})}
+                  onPress={() => void control($, 'goto', k + 1)}
+                >
+                  {roundLabel(item, k + 1, current)}
+                </Button>
+              )
+            })}
+            {s.revisitDue !== undefined && (
+              <Text size="caption" dimColor>
+                Question {s.revisitDue} goes to Claude to revisit next.
+              </Text>
+            )}
           </Box>
         )}
 
         {s && s.transcript.length > 0 && (
-          <Box flexDirection="column">
-            <Text bold>Conversation</Text>
+          <Box key="conversation" flexDirection="column" gap="xs">
+            <Text size="footnote" weight="semibold" dimColor>
+              Conversation
+            </Text>
             {s.transcript
               .slice(-16)
               .reverse()
               .map(line => (
-                <Text dimColor={line.who === 'system'}>
+                <Text dimColor={line.who === 'system'} {...(line.who === 'system' ? { size: 'caption' as const } : {})}>
                   <Text bold={line.who !== 'system'} color={line.who === 'claude' ? CLAUDE : line.who === 'user' ? YOU : undefined}>
                     {WHO[line.who]}
                     {line.typed ? ' ⌨' : ''}
@@ -538,9 +582,80 @@ export const register: Register = on => {
               ))}
           </Box>
         )}
+
+        {(s?.lastSession && s.sessionStartedAt === undefined) || s?.todayCostUsd !== undefined ? (
+          <Box key="costs" flexDirection="column">
+            {s?.sessionStartedAt === undefined && s?.lastSession && (
+              <Text size="caption" dimColor>
+                Last session: {minutes(s.lastSession.durationMs)} · est. {usd(s.lastSession.costUsd)} (speech {usd(s.lastSession.speechUsd)} ·
+                transcription {usd(s.lastSession.transcriptionUsd)})
+              </Text>
+            )}
+            {s?.todayCostUsd !== undefined && (
+              <Text size="caption" dimColor>
+                OpenAI est. today {usd(s.todayCostUsd)} · this month {usd(s.monthCostUsd ?? 0)}
+              </Text>
+            )}
+          </Box>
+        ) : (
+          ''
+        )}
       </Box>
     )
   })
+}
+
+/** The pane's model chips: what each model does, then its name. */
+function modelChips(m: VoiceModels): [string, string][] {
+  return [['Speaks', `${m.speech} · ${m.voice}`], ['Hears', m.transcription], ...(m.understanding ? [['Understands', m.understanding] as [string, string]] : [])]
+}
+
+// The status icon on graphical surfaces: SVG with SMIL animation, so it moves
+// without redrawing the pane. Fixed colors, readable on light and dark.
+const HEX = { claude: '#D97757', you: '#4C8DF6', listen: '#2EA56B', warn: '#D9A21B', muted: '#8A8F98', error: '#E5484D' }
+
+function svg(body: string): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="18" viewBox="0 0 24 18">${body}</svg>`
+}
+
+function bars(color: string): string {
+  return svg(
+    [0, 1, 2, 3, 4]
+      .map(i => {
+        const begin = `-${(i * 0.17).toFixed(2)}s`
+        return `<rect x="${i * 5}" y="5" width="3" height="8" rx="1.5" fill="${color}"><animate attributeName="height" values="4;16;7;12;4" dur="1.1s" begin="${begin}" repeatCount="indefinite"/><animate attributeName="y" values="7;1;5.5;3;7" dur="1.1s" begin="${begin}" repeatCount="indefinite"/></rect>`
+      })
+      .join(''),
+  )
+}
+
+function statusIcon(activity: VoiceActivity): string {
+  switch (activity) {
+    case 'speaking':
+      return bars(HEX.claude)
+    case 'hearing':
+      return bars(HEX.you)
+    case 'listening':
+      return svg(
+        `<circle cx="12" cy="9" r="4" fill="${HEX.listen}"/><circle cx="12" cy="9" r="4" fill="none" stroke="${HEX.listen}" stroke-width="1.5"><animate attributeName="r" values="4;8.5" dur="1.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0" dur="1.4s" repeatCount="indefinite"/></circle>`,
+      )
+    case 'connecting':
+      return svg(
+        `<circle cx="12" cy="9" r="6" fill="none" stroke="${HEX.muted}" stroke-width="2" stroke-linecap="round" stroke-dasharray="22 16"><animateTransform attributeName="transform" type="rotate" from="0 12 9" to="360 12 9" dur="0.9s" repeatCount="indefinite"/></circle>`,
+      )
+    case 'idle':
+      return svg(`<circle cx="12" cy="9" r="4" fill="${HEX.listen}" opacity="0.55"/>`)
+    case 'muted':
+      return svg(
+        `<rect x="9" y="2" width="6" height="10" rx="3" fill="none" stroke="${HEX.warn}" stroke-width="1.6"/><path d="M6.5 9.5a5.5 5.5 0 0 0 11 0M12 15v2" fill="none" stroke="${HEX.warn}" stroke-width="1.6" stroke-linecap="round"/><path d="M5 2l14 14" stroke="${HEX.warn}" stroke-width="1.8" stroke-linecap="round"/>`,
+      )
+    case 'paused':
+      return svg(`<rect x="7" y="3" width="3.5" height="12" rx="1.2" fill="${HEX.warn}"/><rect x="13.5" y="3" width="3.5" height="12" rx="1.2" fill="${HEX.warn}"/>`)
+    case 'error':
+      return svg(`<circle cx="12" cy="9" r="7" fill="${HEX.error}"/><path d="M9 6l6 6M15 6l-6 6" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>`)
+    case 'off':
+      return svg(`<circle cx="12" cy="9" r="5" fill="none" stroke="${HEX.muted}" stroke-width="1.6"/>`)
+  }
 }
 
 function parseState(result: McpToolResult): VoiceStateV1 | VoiceStateUnchanged | undefined {

@@ -7,6 +7,7 @@ import {
   type TranscriptLine,
   type VoiceActivity,
   type VoiceCard,
+  type VoiceModels,
   type VoiceControlAction,
   type VoiceRound,
   type VoiceSessionCost,
@@ -30,6 +31,8 @@ export type SessionDeps = {
   idleDisconnectMs: number
   refreshAfterMs: number
   baseVocabulary: readonly string[]
+  /** The models in use, from the config, shown in the pane. */
+  models?: VoiceModels
   /** Speech must last this long before it stops Claude (noise bursts don't). */
   bargeInConfirmMs?: number
   /** Utterances shorter than this are treated as noise and dropped. */
@@ -706,6 +709,7 @@ export class VoiceSession {
       awaitingReply: this.awaiting,
       provider: this.provider?.name ?? 'openai-realtime',
       model: this.provider?.model ?? '',
+      ...(this.deps.models ? { models: this.deps.models } : {}),
       sessionStartedAt: this.startedAt,
       estimatedCostUsd: round(this.currentCost()),
       lastSession: this.lastSession,

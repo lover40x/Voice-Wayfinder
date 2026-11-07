@@ -63,6 +63,12 @@ const session = new VoiceSession({
   idleDisconnectMs: cfg.session.idleDisconnectMin * 60_000,
   refreshAfterMs: cfg.session.refreshAfterMin * 60_000,
   baseVocabulary: cfg.vocabulary,
+  models: {
+    speech: cfg.openai.model,
+    voice: cfg.openai.voice,
+    transcription: cfg.openai.transcription.model,
+    ...(cfg.openai.understanding?.enabled !== false && cfg.openai.understanding?.model ? { understanding: cfg.openai.understanding.model } : {}),
+  },
 })
 
 void checkClaudeCodeVersion().then(w => w && session.warn(w))

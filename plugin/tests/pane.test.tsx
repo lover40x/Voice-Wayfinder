@@ -153,6 +153,32 @@ test('the conversation lists the newest line first', async ($, on) => {
   await ui.unmount()
 })
 
+const MODELS = { speech: 'gpt-realtime-2.1', voice: 'marin', transcription: 'gpt-live-transcribe', understanding: 'gpt-6-luna' }
+
+test('the pane names the models in use, as chips with an animated status icon on desktop', async ($, on) => {
+  bridge(on, { ...STATE, models: MODELS }, [])
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'model-Speaks' }))?.text).toBe('Speaks gpt-realtime-2.1 · marin')
+  expect((await ui.find({ key: 'model-Hears' }))?.text).toBe('Hears gpt-live-transcribe')
+  expect((await ui.find({ key: 'model-Understands' }))?.text).toBe('Understands gpt-6-luna')
+  expect(await ui.find({ type: 'Svg' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the terminal pane names the models on one line, and the status keeps its glyph', async ($, on) => {
+  bridge(on, { ...STATE, models: { ...MODELS, understanding: undefined } }, [])
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // One dim line, wrapped at the pane's width.
+  expect((await ui.find({ type: 'Text', text: /^Speaks/ }))?.text).toContain('Speaks gpt-realtime-2.1 · marin')
+  expect(await ui.find({ type: 'Text', text: /Hears gpt-live-transcribe/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Understands/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Svg' })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /Listening/ }))?.text).toMatch(/^[●◉○] Listening/)
+  await ui.unmount()
+})
+
 test('the controls are four short buttons', async ($, on) => {
   bridge(on, STATE, [])
   await $.command.run(OPEN_PANE)

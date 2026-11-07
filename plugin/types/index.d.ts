@@ -67,6 +67,18 @@ export type VoiceSessionCost = {
   heardMs: number
 }
 
+/** The models a voice session uses, from the config: shown in the pane. */
+export type VoiceModels = {
+  /** The realtime model that speaks Claude's words. */
+  speech: string
+  /** Its voice. */
+  voice: string
+  /** The model that transcribes the person. */
+  transcription: string
+  /** The model that checks each spoken answer; absent when the check is off. */
+  understanding?: string
+}
+
 export type VoiceStateV1 = {
   v: 1
   rev: number
@@ -75,6 +87,7 @@ export type VoiceStateV1 = {
   awaitingReply: boolean
   provider: string
   model: string
+  models?: VoiceModels
   sessionStartedAt?: number
   /** The voice session in progress (0 when none). */
   estimatedCostUsd: number

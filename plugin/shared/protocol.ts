@@ -3,6 +3,7 @@
 
 export type {
   RoundItem,
+  VoiceModels,
   TranscriptLine,
   VoiceActivity,
   VoiceCard,

@@ -236,7 +236,8 @@ test('ending mid-interview returns what was answered and what was not asked', as
   speakThrough(provider, audio, 's1')
   await tick()
   provider.utter('ตอบหนึ่ง')
-  await tick(80)
+  // The first answer is taken and the second question is being asked.
+  await until(() => provider.said.some(t => t.includes('ข้อสอง')))
   session.control('end')
   const r = await round
   assert.equal(r.answers.length, 2)
