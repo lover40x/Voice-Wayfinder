@@ -158,13 +158,19 @@ test('the conversation lists the newest line first', async ($, on) => {
 
 const MODELS = { speech: 'gpt-realtime-2.1', voice: 'marin', transcription: 'gpt-live-transcribe', understanding: 'gpt-6-luna' }
 
-test('the pane names the models in use, as chips with an animated status icon on desktop', async ($, on) => {
+test('the pane names the models on one line, then the controls, then the speed, with an animated status icon on desktop', async ($, on) => {
   bridge(on, { ...STATE, models: MODELS }, [])
   await $.command.run(OPEN_PANE)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ key: 'model-Speaks' }))?.text).toBe('Speaks gpt-realtime-2.1 · marin')
-  expect((await ui.find({ key: 'model-Hears' }))?.text).toBe('Hears gpt-live-transcribe')
-  expect((await ui.find({ key: 'model-Understands' }))?.text).toBe('Understands gpt-6-luna')
+  const line = await ui.find({ type: 'Text', text: /^🗣/ })
+  expect(line?.text).toBe('🗣 gpt-realtime-2.1 (marin) · 👂 gpt-live-transcribe · 🧠 gpt-6-luna')
+  expect(line?.props.wrap).toBe('truncate-end')
+  // In drawing order: the model line, the four controls, then the speed control.
+  const all = await ui.findAll({})
+  const at = (match: (e: (typeof all)[number]) => boolean) => all.findIndex(match)
+  const order = [at(e => e.type === 'Text' && e.text.startsWith('🗣')), at(e => e.key === 'pause'), at(e => e.key === 'end'), at(e => e.key === 'slower')]
+  expect(order.every(i => i >= 0)).toBe(true)
+  expect([...order].sort((a, b) => a - b)).toEqual(order)
   expect(await ui.find({ type: 'Svg' })).toBeDefined()
   await ui.unmount()
 })
@@ -173,12 +179,43 @@ test('the terminal pane names the models on one line, and the status keeps its g
   bridge(on, { ...STATE, models: { ...MODELS, understanding: undefined } }, [])
   await $.command.run(OPEN_PANE)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  // One dim line, wrapped at the pane's width.
-  expect((await ui.find({ type: 'Text', text: /^Speaks/ }))?.text).toContain('Speaks gpt-realtime-2.1 · marin')
-  expect(await ui.find({ type: 'Text', text: /Hears gpt-live-transcribe/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /Understands/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^🗣/ }))?.text).toBe('🗣 gpt-realtime-2.1 (marin) · 👂 gpt-live-transcribe')
   expect(await ui.find({ type: 'Svg' })).toBeUndefined()
   expect((await ui.find({ type: 'Text', text: /Listening/ }))?.text).toMatch(/^[●◉○] Listening/)
+  await ui.unmount()
+})
+
+test('the speed control steps the speech slower or faster, and resets to normal', async ($, on) => {
+  const calls: Call[] = []
+  bridge(on, { ...STATE, speed: 1.2 }, calls)
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: '1.2×' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '─────●───' })).toBeDefined()
+  await ui.press({ key: 'slower' })
+  await ui.press({ key: 'faster' })
+  await ui.press({ key: 'speed-reset' })
+  expect(calls.filter(c => c.args.action === 'speed').map(c => c.args.speed)).toEqual([1.1, 1.3, 1])
+  await ui.unmount()
+})
+
+test('at normal speed there is no reset', async ($, on) => {
+  bridge(on, STATE, [])
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: '1.0×' })).toBeDefined()
+  expect(await ui.find({ key: 'speed-reset' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('at the fastest speed, faster stays there', async ($, on) => {
+  const calls: Call[] = []
+  bridge(on, { ...STATE, speed: 1.5 }, calls)
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: '────────●' })).toBeDefined()
+  await ui.press({ key: 'faster' })
+  expect(calls.filter(c => c.args.action === 'speed').map(c => c.args.speed)).toEqual([1.5])
   await ui.unmount()
 })
 

@@ -55,6 +55,7 @@ Example, for a card with three choices:
 - Never speak code, URLs or issue numbers: say what they mean instead. Turn a table or list into spoken sentences ("ข้อหนึ่ง… ข้อดีคือ… ข้อเสียคือ…"); the card in `screen` keeps the exact layout.
 - The length is for questions and explanations. Confirmations, recaps, and "working on it" lines stay to one or two sentences.
 - The person may cut in at any point: speech stops and what they said is their reply (see Hearing).
+- When they ask you to speak faster or slower ("พูดช้าลงหน่อย", "เร็วขึ้นได้"), call `voice_control` with `speed` (1 is normal; about 0.1 a step, 0.7 to 1.5) and carry on. They can also set it with the speed control in the voice pane.
 - The bridge already says a short "ค่ะ" the moment an answer is complete, and plays a soft tone while you take a while. Don't open your next turn with an acknowledgement of your own.
 
 ## Pace

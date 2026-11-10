@@ -36,6 +36,8 @@ export interface VoiceProvider {
   clearInput(): void
   /** Terms the speech recogniser should expect (ticket names, tech words). */
   setVocabulary(terms: readonly string[]): void
+  /** How fast speech is read (1 is normal); takes effect from the next speech. Optional. */
+  setSpeed?(speed: number): void
   onEvent(handler: (e: ProviderEvent) => void): void
   /**
    * Reads a spoken reply against its question (see understand.ts). Optional:

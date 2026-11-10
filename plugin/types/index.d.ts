@@ -84,6 +84,8 @@ export type VoiceStateV1 = {
   rev: number
   activity: VoiceActivity
   muted: boolean
+  /** How fast Claude's speech is read (1 is normal), set with the pane's speed control. */
+  speed?: number
   awaitingReply: boolean
   provider: string
   model: string
@@ -119,9 +121,10 @@ export type VoiceStateUnchanged = { v: 1; rev: number; unchanged: true }
  * hands over what they said while no question waited, answered with `heard`;
  * `start` turns voice mode back on after `end`; `pause` holds everything (mic, speech,
  * timeouts, Claude's next voice call) until `resume`; `goto` (with `question`, 1-based)
- * jumps the round to that question, or asks Claude to revisit it once the round is over.
+ * jumps the round to that question, or asks Claude to revisit it once the round is over;
+ * `speed` (with `speed`) sets how fast speech is read, from the next sentence on.
  */
-export type VoiceControlAction = 'start' | 'pause' | 'resume' | 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take' | 'goto'
+export type VoiceControlAction = 'start' | 'pause' | 'resume' | 'mute' | 'unmute' | 'skip' | 'end' | 'type' | 'take' | 'goto' | 'speed'
 
 /** Whether the pane can reach the bridge's MCP server. */
 export type BridgeLink = {

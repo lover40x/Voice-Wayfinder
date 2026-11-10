@@ -46,6 +46,10 @@ class FakeProvider implements VoiceProvider {
   setVocabulary(terms: readonly string[]) {
     this.vocabulary = terms
   }
+  speeds: number[] = []
+  setSpeed(speed: number) {
+    this.speeds.push(speed)
+  }
   onEvent(h: (e: ProviderEvent) => void) {
     this.handlers.push(h)
   }
@@ -1310,4 +1314,54 @@ test("Claude's speech is priced by the model that speaks", async () => {
   assert.equal(costOf('gpt-realtime-2.1-mini'), 20)
   assert.equal(costOf('gpt-realtime-2.1'), 64)
   assert.equal(costOf('some-new-model'), 64)
+})
+
+test('the speed set in the pane reaches the voice now and on the next connect, kept in range and saved', async () => {
+  const saved: number[] = []
+  const { provider, session } = setup({ speed: 1.2, saveSpeed: v => saved.push(v) })
+  assert.equal((session.state() as VoiceStateV1).speed, 1.2)
+  // Before any call: nothing is connected yet, the speed waits for the connect.
+  assert.equal(session.control('speed', '', undefined, 0.9).accepted, true)
+  void session.say('ทดสอบ')
+  await tick()
+  assert.deepEqual(provider.speeds, [0.9])
+  session.control('speed', '', undefined, 3)
+  session.control('speed', '', undefined, 0.1)
+  session.control('speed', '', undefined, 1.13)
+  assert.deepEqual(provider.speeds, [0.9, 1.5, 0.7, 1.15])
+  assert.deepEqual(saved, [0.9, 1.5, 0.7, 1.15])
+  assert.equal((session.state() as VoiceStateV1).speed, 1.15)
+  assert.equal(session.control('speed').accepted, false)
+})
+
+test('a speed change waits for the speech in progress, then goes to OpenAI as a session update', async () => {
+  const { OpenAIRealtimeProvider } = await import('../src/providers/openai-realtime.ts')
+  const { loadConfig } = await import('../src/config.ts')
+  process.env.VOICE_WAYFINDER_CONFIG = join(mkdtempSync(join(tmpdir(), 'vw-')), 'config.json')
+  const p = new OpenAIRealtimeProvider(loadConfig(join(import.meta.dirname, '..', '..', 'plugin')).openai, 'test')
+  const sent: { type: string; session?: { audio?: { output?: { speed?: number } } } }[] = []
+  const raw = p as unknown as { ws: unknown; handle(m: unknown): void }
+  raw.ws = { readyState: 1, send: (t: string) => sent.push(JSON.parse(t)), close() {} }
+  const updates = () => sent.filter(e => e.type === 'session.update').map(e => e.session?.audio?.output?.speed)
+  const id = p.say('สวัสดีค่ะ')
+  raw.handle({ type: 'response.created', response: { id: 'r1', metadata: { speech_id: id } } })
+  p.setSpeed(0.9)
+  assert.deepEqual(updates(), [])
+  raw.handle({ type: 'response.done', response: { id: 'r1', status: 'completed' } })
+  assert.deepEqual(updates(), [0.9])
+  p.setSpeed(1.3)
+  assert.deepEqual(updates(), [0.9, 1.3])
+})
+
+test('a speed saved from the pane wins over the config at the next start', async () => {
+  const { loadConfig, saveSpeed } = await import('../src/config.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'vw-'))
+  process.env.VOICE_WAYFINDER_CONFIG = join(dir, 'config.json')
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ openai: { speed: 1.4 } }))
+  const root = join(import.meta.dirname, '..', '..', 'plugin')
+  assert.equal(loadConfig(root).openai.speed, 1.4)
+  saveSpeed(0.95)
+  assert.equal(loadConfig(root).openai.speed, 0.95)
+  writeFileSync(join(dir, 'prefs.json'), '{ broken')
+  assert.equal(loadConfig(root).openai.speed, 1.4)
 })

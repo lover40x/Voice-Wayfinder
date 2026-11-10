@@ -49,6 +49,10 @@ export type SessionDeps = {
    */
   thinkingCue?: { pcm?: Buffer; text?: string; afterMs: number; repeatMs?: number; maxTimes?: number }
   clips?: ClipCache
+  /** How fast speech is read at start (1 is normal); the pane's speed control changes it. */
+  speed?: number
+  /** Keeps a speed set from the pane for the next start. */
+  saveSpeed?: (speed: number) => void
   now?: () => number
   tickMs?: number
 }
@@ -59,6 +63,10 @@ function describeTaken(a: { answer: string; understood?: Understanding }): strin
   if (!u || u.kind !== 'answer') return a.answer
   return `${u.answer}${u.echo ? ` (confirmed aloud: "${u.echo}")` : ''}`
 }
+
+/** The range the pane's speed control moves in. */
+export const SPEED_MIN = 0.7
+export const SPEED_MAX = 1.5
 
 const STOPPED = 'The person ended voice mode (End). Continue in text and make no more voice calls until they start voice mode again.'
 
@@ -199,6 +207,7 @@ export class VoiceSession {
   private userSpeaking = false
   private awaiting = false
   private muted = false
+  private speed: number
   private skipRequested = false
   private endRequested = false
   /**
@@ -257,6 +266,7 @@ export class VoiceSession {
   constructor(deps: SessionDeps) {
     this.deps = deps
     this.now = deps.now ?? Date.now
+    this.speed = deps.speed ?? 1
     if (deps.noiseGate !== false && deps.noiseGate !== undefined) this.gate = new NoiseGate(deps.noiseGate)
     this.tickMs = deps.tickMs ?? 50
   }
@@ -587,7 +597,7 @@ export class VoiceSession {
     return r
   }
 
-  control(action: VoiceControlAction, text = '', question?: number): { message: string; accepted: boolean; heard?: string[]; pausedMs?: number; revisit?: Revisit } {
+  control(action: VoiceControlAction, text = '', question?: number, speed?: number): { message: string; accepted: boolean; heard?: string[]; pausedMs?: number; revisit?: Revisit } {
     const done = (message: string, accepted = true) => ({ message, accepted })
     switch (action) {
       case 'mute':
@@ -601,6 +611,16 @@ export class VoiceSession {
         this.muted = false
         this.touch()
         return done('Microphone on.')
+      case 'speed': {
+        if (speed === undefined || !Number.isFinite(speed)) return done('Give a speed.', false)
+        // OpenAI reads 0.25 to 1.5; below 0.7 Thai drags, so the pane stays in 0.7 to 1.5.
+        const next = Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, speed)) * 20) / 20
+        this.speed = next
+        this.provider?.setSpeed?.(next)
+        this.deps.saveSpeed?.(next)
+        this.changed()
+        return done(`Speech speed ${next}×, from the next sentence on.`)
+      }
       case 'skip':
         if (!this.speech && !this.awaiting) return done('Nothing to skip.', false)
         this.skipRequested = true
@@ -723,6 +743,7 @@ export class VoiceSession {
       rev: this.rev,
       activity: this.activity(),
       muted: this.muted,
+      speed: this.speed,
       awaitingReply: this.awaiting,
       provider: this.provider?.name ?? 'openai-realtime',
       model: this.provider?.model ?? '',
@@ -813,6 +834,7 @@ export class VoiceSession {
       p.onEvent(e => this.onProvider(p, e))
       a.onEvent(e => this.onAudio(a, e))
       p.setVocabulary(this.vocabulary())
+      p.setSpeed?.(this.speed)
       await a.start() // mic permission problems surface before any API cost
       await p.connect()
     } catch (err) {

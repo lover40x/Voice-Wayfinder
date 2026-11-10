@@ -171,10 +171,10 @@ async function poll($: EngineInterface, force = false) {
   }
 }
 
-async function control($: EngineInterface, action: VoiceControlAction, question?: number) {
+async function control($: EngineInterface, action: VoiceControlAction, question?: number, speed?: number) {
   const name = await connect($)
   if (!name) return
-  await $.mcp.call(name, 'voice_control', question === undefined ? { action } : { action, question })
+  await $.mcp.call(name, 'voice_control', { action, ...(question !== undefined ? { question } : {}), ...(speed !== undefined ? { speed } : {}) })
   await poll($, true)
 }
 
@@ -469,6 +469,7 @@ export const register: Register = on => {
     const inQuestion = s !== null && (s.activity === 'speaking' || s.awaitingReply)
     const card = s?.card
     const models = s?.models
+    const speed = s?.speed ?? 1
     const heading = (text: string, hint?: string) => (
       <Text size="footnote" weight="semibold" dimColor>
         {text}
@@ -498,21 +499,55 @@ export const register: Register = on => {
               {hint}
             </Text>
           )}
-          {models &&
-            (Svg ? (
-              <Box key="models" flexDirection="row" flexWrap="wrap" gap="xs">
-                {modelChips(models).map(([role, name]) => (
-                  <Box key={`model-${role}`} borderStyle="round" borderDimColor paddingX={1}>
-                    <Text size="caption">
-                      <Text dimColor>{role} </Text>
-                      <Text mono>{name}</Text>
-                    </Text>
-                  </Box>
-                ))}
-              </Box>
-            ) : (
-              <Text dimColor>{modelChips(models).map(([role, name]) => `${role} ${name}`).join(' · ')}</Text>
-            ))}
+          {models && (
+            <Text key="models" size="caption" dimColor wrap="truncate-end">
+              {modelLine(models)}
+            </Text>
+          )}
+          {live && (
+            <Box key="controls" flexDirection="row" flexWrap="wrap" gap="xs">
+              <Button
+                key="pause"
+                variant={s.activity === 'paused' ? 'primary' : 'secondary'}
+                onPress={() => void control($, s.activity === 'paused' ? 'resume' : 'pause')}
+              >
+                {s.activity === 'paused' ? '▶ Resume' : '⏸ Pause'}
+              </Button>
+              <Button key="mute" variant={s.muted ? 'primary' : 'secondary'} onPress={() => void control($, s.muted ? 'unmute' : 'mute')}>
+                {s.muted ? '🎙 Unmute' : '🔇 Mute'}
+              </Button>
+              <Button key="skip" variant="secondary" onPress={() => void control($, 'skip')}>
+                ⏭ Skip
+              </Button>
+              <Button key="end" variant="secondary" onPress={() => void control($, 'end')}>
+                ⏹ End
+              </Button>
+            </Box>
+          )}
+          {live && (
+            <Box key="speed" flexDirection="row" alignItems="center" gap="xs">
+              <Text size="caption" dimColor>
+                Speed
+              </Text>
+              <Button key="slower" label="Slower" variant="secondary" onPress={() => void control($, 'speed', undefined, stepSpeed(speed, -1))}>
+                −
+              </Button>
+              <Text size="caption" mono dimColor wrap="truncate-end">
+                {speedTrack(speed)}
+              </Text>
+              <Button key="faster" label="Faster" variant="secondary" onPress={() => void control($, 'speed', undefined, stepSpeed(speed, 1))}>
+                +
+              </Button>
+              <Text size="caption" weight="semibold" tabular>
+                {speed.toFixed(2).replace(/0$/, '')}×
+              </Text>
+              {speed !== 1 && (
+                <Button key="speed-reset" plain dimColor onPress={() => void control($, 'speed', undefined, 1)}>
+                  reset
+                </Button>
+              )}
+            </Box>
+          )}
           {l.status !== 'ok' && l.status !== 'connecting' && <Text color="warning">{l.message ?? 'The voice bridge is not reachable.'}</Text>}
           {s?.error && <Text color="error">{s.error}</Text>}
           {s?.warning && <Text color="warning">{s.warning}</Text>}
@@ -572,27 +607,6 @@ export const register: Register = on => {
                 </Text>
               )
             )}
-          </Box>
-        )}
-
-        {live && (
-          <Box key="controls" flexDirection="row" flexWrap="wrap" gap="xs">
-            <Button
-              key="pause"
-              variant={s.activity === 'paused' ? 'primary' : 'secondary'}
-              onPress={() => void control($, s.activity === 'paused' ? 'resume' : 'pause')}
-            >
-              {s.activity === 'paused' ? '▶ Resume' : '⏸ Pause'}
-            </Button>
-            <Button key="mute" variant={s.muted ? 'primary' : 'secondary'} onPress={() => void control($, s.muted ? 'unmute' : 'mute')}>
-              {s.muted ? '🎙 Unmute' : '🔇 Mute'}
-            </Button>
-            <Button key="skip" variant="secondary" onPress={() => void control($, 'skip')}>
-              ⏭ Skip
-            </Button>
-            <Button key="end" variant="secondary" onPress={() => void control($, 'end')}>
-              ⏹ End
-            </Button>
           </Box>
         )}
 
@@ -664,9 +678,28 @@ export const register: Register = on => {
   })
 }
 
-/** The pane's model chips: what each model does, then its name. */
-function modelChips(m: VoiceModels): [string, string][] {
-  return [['Speaks', `${m.speech} · ${m.voice}`], ['Hears', m.transcription], ...(m.understanding ? [['Understands', m.understanding] as [string, string]] : [])]
+/** The models in one line: 🗣 speaks, 👂 hears, 🧠 checks each answer. */
+export function modelLine(m: VoiceModels): string {
+  return [`🗣 ${m.speech} (${m.voice})`, `👂 ${m.transcription}`, ...(m.understanding ? [`🧠 ${m.understanding}`] : [])].join(' · ')
+}
+
+/** The speed control's range and step; the bridge keeps the same range. */
+const SPEED_MIN = 0.7
+const SPEED_MAX = 1.5
+const SPEED_STEP = 0.1
+
+/** One step slower (-1) or faster (1), from a speed that may sit between steps. */
+export function stepSpeed(speed: number, dir: -1 | 1): number {
+  const steps = (speed - SPEED_MIN) / SPEED_STEP
+  const next = dir > 0 ? Math.floor(steps + 1e-6) + 1 : Math.ceil(steps - 1e-6) - 1
+  return Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, SPEED_MIN + next * SPEED_STEP)) * 100) / 100
+}
+
+/** The slider's track: a knob where the speed sits between slowest and fastest. */
+export function speedTrack(speed: number): string {
+  const slots = Math.round((SPEED_MAX - SPEED_MIN) / SPEED_STEP) + 1
+  const at = Math.round((Math.min(SPEED_MAX, Math.max(SPEED_MIN, speed)) - SPEED_MIN) / SPEED_STEP)
+  return Array.from({ length: slots }, (_, i) => (i === at ? '●' : '─')).join('')
 }
 
 // The status icon on graphical surfaces: SVG with SMIL animation, so it moves

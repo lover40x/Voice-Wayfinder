@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 
-import { defaultClipDir, defaultLogDir, loadConfig, userConfigPath } from './config.ts'
+import { defaultClipDir, defaultLogDir, loadConfig, saveSpeed, userConfigPath } from './config.ts'
 import { HelperAudioDevice, helperPath } from './audio.ts'
 import { ClipCache } from './clips.ts'
 import { TranscriptLog } from './log.ts'
@@ -60,6 +60,8 @@ const session = new VoiceSession({
   thinkingCue: thinkingCue(),
   // Anything that changes how a clip sounds is part of its cache key.
   clips: new ClipCache(defaultClipDir(), [cfg.openai.model, cfg.openai.voice, cfg.openai.speed, cfg.openai.instructions ?? DEFAULT_INSTRUCTIONS].join('|')),
+  speed: cfg.openai.speed,
+  saveSpeed,
   idleDisconnectMs: cfg.session.idleDisconnectMin * 60_000,
   refreshAfterMs: cfg.session.refreshAfterMin * 60_000,
   baseVocabulary: cfg.vocabulary,
@@ -309,15 +311,16 @@ server.registerTool(
   {
     title: 'Voice control',
     description:
-      'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. "pause" and "resume" belong to the person (the Pause button in the voice pane): while paused, your voice calls wait. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. "goto" is the question list in the voice pane. You never need "type", "take" or "goto".',
+      'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. "pause" and "resume" belong to the person (the Pause button in the voice pane): while paused, your voice calls wait. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. "goto" is the question list in the voice pane and "speed" its speed control. You never need "type", "take", "goto" or "speed", unless the person asks you to speak faster or slower.',
     inputSchema: {
-      action: z.enum(['start', 'pause', 'resume', 'mute', 'unmute', 'skip', 'end', 'type', 'take', 'goto']),
+      action: z.enum(['start', 'pause', 'resume', 'mute', 'unmute', 'skip', 'end', 'type', 'take', 'goto', 'speed']),
       text: z.string().max(4000).optional().describe('With "type": what the person typed.'),
       question: z.number().int().min(1).max(8).optional().describe('With "goto": the question of the round to go to, from 1.'),
+      speed: z.number().min(0.25).max(1.5).optional().describe('With "speed": how fast speech is read, 1 is normal.'),
     },
   },
-  async ({ action, text: typed, question }) => {
-    const r = session.control(action, typed, question)
+  async ({ action, text: typed, question, speed }) => {
+    const r = session.control(action, typed, question, speed)
     return text(r.message, r)
   },
 )

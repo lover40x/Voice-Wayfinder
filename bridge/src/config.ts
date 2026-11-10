@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 export type TurnDetection =
   | { type: 'server_vad'; threshold: number; prefixPaddingMs: number; silenceDurationMs: number }
@@ -73,11 +73,35 @@ export type BridgeConfig = {
 export const userConfigPath = () =>
   process.env.VOICE_WAYFINDER_CONFIG ?? join(homedir(), '.config', 'voice-wayfinder', 'config.json')
 
+/** What the pane sets and the bridge keeps between starts (the speech speed), beside the person's config. */
+export const prefsPath = () => join(dirname(userConfigPath()), 'prefs.json')
+
 export function loadConfig(pluginRoot: string): BridgeConfig {
   const defaults = JSON.parse(readFileSync(join(pluginRoot, 'config', 'defaults.json'), 'utf8'))
   const path = userConfigPath()
   const overrides = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {}
-  return deepMerge(defaults, overrides) as BridgeConfig
+  const cfg = deepMerge(defaults, overrides) as BridgeConfig
+  const speed = readPrefs().speed
+  if (typeof speed === 'number' && Number.isFinite(speed)) cfg.openai.speed = speed
+  return cfg
+}
+
+function readPrefs(): { speed?: unknown } {
+  try {
+    const path = prefsPath()
+    return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {}
+  } catch {
+    return {} // a broken prefs file never stops the bridge
+  }
+}
+
+/** Keeps the speed set in the pane for the next start; a failed write only loses that. */
+export function saveSpeed(speed: number) {
+  try {
+    const path = prefsPath()
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${JSON.stringify({ ...readPrefs(), speed }, null, 2)}\n`)
+  } catch {}
 }
 
 export function defaultClipDir(): string {

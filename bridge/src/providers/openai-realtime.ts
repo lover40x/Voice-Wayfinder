@@ -49,6 +49,9 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
   private vocabulary: readonly string[] = []
   private speechStartMs?: number
   private closingOnPurpose = false
+  private speed: number
+  /** A speed change waiting for the speech in progress to finish (speed can't change mid-response). */
+  private speedDue = false
   private readonly cfg: OpenAIConfig
   private readonly apiKey: string
 
@@ -56,6 +59,7 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
     this.cfg = cfg
     this.apiKey = apiKey
     this.model = cfg.model
+    this.speed = cfg.speed
   }
 
   onEvent(handler: (e: ProviderEvent) => void) {
@@ -82,7 +86,10 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
         )
       })
       ws.on('error', err => fail(`OpenAI Realtime connection failed: ${err.message}`))
-      ws.on('open', () => this.send({ type: 'session.update', session: this.sessionConfig() }))
+      ws.on('open', () => {
+        this.speedDue = false // the full config carries the current speed
+        this.send({ type: 'session.update', session: this.sessionConfig() })
+      })
       ws.on('message', raw => {
         const msg = JSON.parse(raw.toString()) as ServerEvent
         if (!ready && msg.type === 'session.updated') {
@@ -218,6 +225,19 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
     this.send({ type: 'input_audio_buffer.clear' })
   }
 
+  setSpeed(speed: number) {
+    this.speed = speed
+    this.speedDue = true
+    this.applySpeed()
+  }
+
+  /** Sends a pending speed change once no response is being generated. */
+  private applySpeed() {
+    if (!this.speedDue || this.speeches.size > 0 || this.ws?.readyState !== WebSocket.OPEN) return
+    this.speedDue = false
+    this.send({ type: 'session.update', session: { type: 'realtime', audio: { output: { speed: this.speed } } } })
+  }
+
   setVocabulary(terms: readonly string[]) {
     this.vocabulary = terms
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -251,7 +271,7 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
                 }
               : { type: 'semantic_vad', eagerness: td.eagerness, create_response: false, interrupt_response: false },
         },
-        output: { format: { type: 'audio/pcm', rate: 24000 }, voice: this.cfg.voice, speed: this.cfg.speed },
+        output: { format: { type: 'audio/pcm', rate: 24000 }, voice: this.cfg.voice, speed: this.speed },
       },
     }
   }
@@ -308,6 +328,7 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
         if (!p) return
         this.speeches.delete(p.speechId)
         this.byResponse.delete(r!.id!)
+        this.applySpeed()
         if (p.clip) {
           if (r?.status === 'completed') p.clip.resolve(Buffer.concat(p.clip.chunks))
           else p.clip.reject(new Error(`clip not rendered (${r?.status ?? 'unknown'})`))

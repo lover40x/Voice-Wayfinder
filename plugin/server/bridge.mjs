@@ -10963,7 +10963,7 @@ var require_websocket_server = __commonJS({
 });
 
 // bridge/src/main.ts
-import { dirname, resolve } from "node:path";
+import { dirname as dirname2, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/helpers/util.js
@@ -40366,15 +40366,36 @@ var StdioServerTransport = class {
 };
 
 // bridge/src/config.ts
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 var userConfigPath = () => process.env.VOICE_WAYFINDER_CONFIG ?? join(homedir(), ".config", "voice-wayfinder", "config.json");
+var prefsPath = () => join(dirname(userConfigPath()), "prefs.json");
 function loadConfig(pluginRoot2) {
   const defaults = JSON.parse(readFileSync(join(pluginRoot2, "config", "defaults.json"), "utf8"));
   const path = userConfigPath();
   const overrides = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
-  return deepMerge(defaults, overrides);
+  const cfg2 = deepMerge(defaults, overrides);
+  const speed = readPrefs().speed;
+  if (typeof speed === "number" && Number.isFinite(speed)) cfg2.openai.speed = speed;
+  return cfg2;
+}
+function readPrefs() {
+  try {
+    const path = prefsPath();
+    return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+  } catch {
+    return {};
+  }
+}
+function saveSpeed(speed) {
+  try {
+    const path = prefsPath();
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${JSON.stringify({ ...readPrefs(), speed }, null, 2)}
+`);
+  } catch {
+  }
 }
 function defaultClipDir() {
   if (process.env.CLAUDE_PLUGIN_DATA) return join(process.env.CLAUDE_PLUGIN_DATA, "clips");
@@ -40512,7 +40533,7 @@ var HelperAudioDevice = class {
 
 // bridge/src/clips.ts
 import { createHash } from "node:crypto";
-import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join3 } from "node:path";
 var ClipCache = class {
   mem = /* @__PURE__ */ new Map();
@@ -40539,8 +40560,8 @@ var ClipCache = class {
       this.mem.set(text2, pcm);
       if (file2) {
         try {
-          mkdirSync(this.dir, { recursive: true });
-          writeFileSync(file2, pcm);
+          mkdirSync2(this.dir, { recursive: true });
+          writeFileSync2(file2, pcm);
         } catch {
         }
       }
@@ -40554,7 +40575,7 @@ ${text2}`).digest("hex")}.pcm`);
 };
 
 // bridge/src/log.ts
-import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync3 } from "node:fs";
+import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 var SECRET = /\b(sk-[A-Za-z0-9_-]{12,}|0\.[0-9a-f-]{20,}\.[A-Za-z0-9+/=:]{20,})/g;
 var redact = (text2) => text2.replace(SECRET, "[redacted]");
@@ -40570,7 +40591,7 @@ var TranscriptLog = class {
   }
   begin(sessionId, meta3) {
     const folder = join4(this.dir, localDay(Date.now()));
-    mkdirSync2(folder, { recursive: true });
+    mkdirSync3(folder, { recursive: true });
     this.file = join4(folder, `${sessionId}.jsonl`);
     this.append({ kind: "session", sessionId, ...meta3, at: Date.now() });
   }
@@ -40955,12 +40976,16 @@ var OpenAIRealtimeProvider = class {
   vocabulary = [];
   speechStartMs;
   closingOnPurpose = false;
+  speed;
+  /** A speed change waiting for the speech in progress to finish (speed can't change mid-response). */
+  speedDue = false;
   cfg;
   apiKey;
   constructor(cfg2, apiKey2) {
     this.cfg = cfg2;
     this.apiKey = apiKey2;
     this.model = cfg2.model;
+    this.speed = cfg2.speed;
   }
   onEvent(handler) {
     this.handlers.push(handler);
@@ -40983,7 +41008,10 @@ var OpenAIRealtimeProvider = class {
         );
       });
       ws.on("error", (err) => fail(`OpenAI Realtime connection failed: ${err.message}`));
-      ws.on("open", () => this.send({ type: "session.update", session: this.sessionConfig() }));
+      ws.on("open", () => {
+        this.speedDue = false;
+        this.send({ type: "session.update", session: this.sessionConfig() });
+      });
       ws.on("message", (raw) => {
         const msg = JSON.parse(raw.toString());
         if (!ready && msg.type === "session.updated") {
@@ -41110,6 +41138,17 @@ ${text2}
   clearInput() {
     this.send({ type: "input_audio_buffer.clear" });
   }
+  setSpeed(speed) {
+    this.speed = speed;
+    this.speedDue = true;
+    this.applySpeed();
+  }
+  /** Sends a pending speed change once no response is being generated. */
+  applySpeed() {
+    if (!this.speedDue || this.speeches.size > 0 || this.ws?.readyState !== wrapper_default.OPEN) return;
+    this.speedDue = false;
+    this.send({ type: "session.update", session: { type: "realtime", audio: { output: { speed: this.speed } } } });
+  }
   setVocabulary(terms) {
     this.vocabulary = terms;
     if (this.ws?.readyState === wrapper_default.OPEN) {
@@ -41139,7 +41178,7 @@ ${text2}
             interrupt_response: false
           } : { type: "semantic_vad", eagerness: td.eagerness, create_response: false, interrupt_response: false }
         },
-        output: { format: { type: "audio/pcm", rate: 24e3 }, voice: this.cfg.voice, speed: this.cfg.speed }
+        output: { format: { type: "audio/pcm", rate: 24e3 }, voice: this.cfg.voice, speed: this.speed }
       }
     };
   }
@@ -41190,6 +41229,7 @@ ${text2}
         if (!p) return;
         this.speeches.delete(p.speechId);
         this.byResponse.delete(r.id);
+        this.applySpeed();
         if (p.clip) {
           if (r?.status === "completed") p.clip.resolve(Buffer.concat(p.clip.chunks));
           else p.clip.reject(new Error(`clip not rendered (${r?.status ?? "unknown"})`));
@@ -41339,6 +41379,8 @@ function describeTaken(a) {
   if (!u || u.kind !== "answer") return a.answer;
   return `${u.answer}${u.echo ? ` (confirmed aloud: "${u.echo}")` : ""}`;
 }
+var SPEED_MIN = 0.7;
+var SPEED_MAX = 1.5;
 var STOPPED = "The person ended voice mode (End). Continue in text and make no more voice calls until they start voice mode again.";
 var BYTES_PER_MS = 48;
 var MAX_LINES = 200;
@@ -41390,6 +41432,7 @@ var VoiceSession = class {
   userSpeaking = false;
   awaiting = false;
   muted = false;
+  speed;
   skipRequested = false;
   endRequested = false;
   /**
@@ -41447,6 +41490,7 @@ var VoiceSession = class {
   constructor(deps) {
     this.deps = deps;
     this.now = deps.now ?? Date.now;
+    this.speed = deps.speed ?? 1;
     if (deps.noiseGate !== false && deps.noiseGate !== void 0) this.gate = new NoiseGate(deps.noiseGate);
     this.tickMs = deps.tickMs ?? 50;
   }
@@ -41743,7 +41787,7 @@ var VoiceSession = class {
     }
     return r;
   }
-  control(action, text2 = "", question) {
+  control(action, text2 = "", question, speed) {
     const done = (message, accepted = true) => ({ message, accepted });
     switch (action) {
       case "mute":
@@ -41757,6 +41801,15 @@ var VoiceSession = class {
         this.muted = false;
         this.touch();
         return done("Microphone on.");
+      case "speed": {
+        if (speed === void 0 || !Number.isFinite(speed)) return done("Give a speed.", false);
+        const next = Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, speed)) * 20) / 20;
+        this.speed = next;
+        this.provider?.setSpeed?.(next);
+        this.deps.saveSpeed?.(next);
+        this.changed();
+        return done(`Speech speed ${next}\xD7, from the next sentence on.`);
+      }
       case "skip":
         if (!this.speech && !this.awaiting) return done("Nothing to skip.", false);
         this.skipRequested = true;
@@ -41869,6 +41922,7 @@ var VoiceSession = class {
       rev: this.rev,
       activity: this.activity(),
       muted: this.muted,
+      speed: this.speed,
       awaitingReply: this.awaiting,
       provider: this.provider?.name ?? "openai-realtime",
       model: this.provider?.model ?? "",
@@ -41951,6 +42005,7 @@ var VoiceSession = class {
       p.onEvent((e) => this.onProvider(p, e));
       a.onEvent((e) => this.onAudio(a, e));
       p.setVocabulary(this.vocabulary());
+      p.setSpeed?.(this.speed);
       await a.start();
       await p.connect();
     } catch (err) {
@@ -42468,7 +42523,7 @@ function checkClaudeCodeVersion() {
 
 // bridge/src/main.ts
 var VERSION = "0.2.0";
-var pluginRoot = process.env.CLAUDE_PLUGIN_ROOT ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
+var pluginRoot = process.env.CLAUDE_PLUGIN_ROOT ?? resolve(dirname2(fileURLToPath(import.meta.url)), "..");
 var cfg = loadConfig(pluginRoot);
 var apiKey = process.env[cfg.openai.apiKeyEnv];
 delete process.env[cfg.openai.apiKeyEnv];
@@ -42504,6 +42559,8 @@ var session = new VoiceSession({
   thinkingCue: thinkingCue(),
   // Anything that changes how a clip sounds is part of its cache key.
   clips: new ClipCache(defaultClipDir(), [cfg.openai.model, cfg.openai.voice, cfg.openai.speed, cfg.openai.instructions ?? DEFAULT_INSTRUCTIONS].join("|")),
+  speed: cfg.openai.speed,
+  saveSpeed,
   idleDisconnectMs: cfg.session.idleDisconnectMin * 6e4,
   refreshAfterMs: cfg.session.refreshAfterMin * 6e4,
   baseVocabulary: cfg.vocabulary,
@@ -42706,15 +42763,16 @@ server.registerTool(
   "voice_control",
   {
     title: "Voice control",
-    description: 'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. "pause" and "resume" belong to the person (the Pause button in the voice pane): while paused, your voice calls wait. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. "goto" is the question list in the voice pane. You never need "type", "take" or "goto".',
+    description: 'Start voice mode (call "start" first: after "end" every voice call answers "ended" until then), mute or unmute the microphone, skip the current question, or end the voice session. "pause" and "resume" belong to the person (the Pause button in the voice pane): while paused, your voice calls wait. The voice pane buttons call this too; the pane uses "type" to hand over what the person typed as their answer and "take" to bring you what they said while you worked. "goto" is the question list in the voice pane and "speed" its speed control. You never need "type", "take", "goto" or "speed", unless the person asks you to speak faster or slower.',
     inputSchema: {
-      action: external_exports.enum(["start", "pause", "resume", "mute", "unmute", "skip", "end", "type", "take", "goto"]),
+      action: external_exports.enum(["start", "pause", "resume", "mute", "unmute", "skip", "end", "type", "take", "goto", "speed"]),
       text: external_exports.string().max(4e3).optional().describe('With "type": what the person typed.'),
-      question: external_exports.number().int().min(1).max(8).optional().describe('With "goto": the question of the round to go to, from 1.')
+      question: external_exports.number().int().min(1).max(8).optional().describe('With "goto": the question of the round to go to, from 1.'),
+      speed: external_exports.number().min(0.25).max(1.5).optional().describe('With "speed": how fast speech is read, 1 is normal.')
     }
   },
-  async ({ action, text: typed, question }) => {
-    const r = session.control(action, typed, question);
+  async ({ action, text: typed, question, speed }) => {
+    const r = session.control(action, typed, question, speed);
     return text(r.message, r);
   }
 );
