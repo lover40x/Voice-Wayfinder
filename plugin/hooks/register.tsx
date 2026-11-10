@@ -23,6 +23,8 @@ const TYPED_ORIGINS = new Set(['composer', 'sdk', 'bridge'])
 const voice = atom({ plugin: 'voice-wayfinder', key: 'voice' } as const, null, { shape: 'voice-v2' })
 const link = atom({ plugin: 'voice-wayfinder', key: 'link' } as const, { status: 'connecting' })
 const tick = atom({ plugin: 'voice-wayfinder', key: 'tick' } as const, 0)
+/** Whether Claude's main loop is working on a turn right now. */
+const working = atom({ plugin: 'voice-wayfinder', key: 'working' } as const, false)
 
 const TICK_MS = 400
 
@@ -44,13 +46,30 @@ const BARS = ['▁▃▅', '▃▅▇', '▅▇▅', '▇▅▃', '▅▃▁', '
 const ACTIVITY: Record<VoiceActivity, { label: string; color: string; frames: string[] }> = {
   off: { label: 'Voice off', color: 'subtle', frames: ['○'] },
   connecting: { label: 'Connecting…', color: 'subtle', frames: ['◜', '◝', '◞', '◟'] },
-  idle: { label: 'Connected', color: 'subtle', frames: ['●'] },
+  // Connected to OpenAI but no voice call from Claude waiting: say what Claude is doing (see labelFor).
+  idle: { label: 'Claude idle', color: 'subtle', frames: ['●'] },
   listening: { label: 'Listening', color: 'success', frames: ['●', '◉', '○', '◉'] },
   hearing: { label: 'Hearing you', color: YOU, frames: BARS },
   speaking: { label: 'Claude speaking', color: CLAUDE, frames: BARS },
   muted: { label: 'Mic muted', color: 'warning', frames: ['⊘'] },
   paused: { label: 'Paused', color: 'warning', frames: ['⏸', '⏸', '⏸', ' '] },
   error: { label: 'Voice error', color: 'error', frames: ['✕'] },
+}
+
+/**
+ * The status label. With no voice call waiting, "Connected" would read as
+ * "Claude hears me": say whether Claude is working (it hears you at its next
+ * step) or idle (what you say starts its next turn) instead.
+ */
+function labelFor(activity: VoiceActivity, isWorking: boolean): string {
+  if (activity === 'idle') return isWorking ? 'Claude working' : 'Claude idle'
+  return ACTIVITY[activity].label
+}
+
+/** What happens to what you say now, under the status in the pane; none while a question waits. */
+function hintFor(activity: VoiceActivity, isWorking: boolean): string | undefined {
+  if (activity !== 'idle') return undefined
+  return isWorking ? 'Not on a voice call: what you say reaches Claude at its next step.' : 'Not on a voice call: speak or type and Claude picks it up.'
 }
 
 const glyph = (activity: VoiceActivity, n: number) => {
@@ -168,10 +187,19 @@ function roundLabel(item: RoundItem, n: number, isCurrent: boolean): string {
   return `${ROUND_GLYPH[isCurrent ? 'current' : item.status]} ${n}. ${q}${a}`
 }
 
+/** Claude started or finished a turn: the status says whether it is working. */
+async function setWorking($: EngineInterface) {
+  const now = turns.size > 0
+  if ((await read($, working)) === now) return
+  await update($, working, () => now)
+  const s = await read($, voice)
+  if (s) showStatus($, s)
+}
+
 /** The line under the prompt: voice state and cost now, or what the last session cost. */
 function showStatus($: EngineInterface, s: VoiceStateV1) {
   let text: string | undefined
-  if (LIVE.has(s.activity)) text = `${ACTIVITY[s.activity].frames[0]} ${ACTIVITY[s.activity].label} · est. ${usd(s.estimatedCostUsd)}`
+  if (LIVE.has(s.activity)) text = `${ACTIVITY[s.activity].frames[0]} ${labelFor(s.activity, turns.size > 0)} · est. ${usd(s.estimatedCostUsd)}`
   else if (s.lastSession) text = `Voice off · last session ${usd(s.lastSession.costUsd)} · today ${usd(s.todayCostUsd ?? s.lastSession.costUsd)}`
   if (text === lastStatus) return
   lastStatus = text
@@ -274,7 +302,13 @@ async function deliverIdle($: EngineInterface) {
   const s = await read($, voice)
   if (!hasWaiting(s)) return
   const last = s.transcript.findLast(line => line.who === 'user')
-  if (s.recapDueAfterMs === undefined && last && Date.now() - last.at < QUIET_MS) return
+  const quietFor = last ? (await $.clock.now()) - last.at : Infinity
+  if (s.recapDueAfterMs === undefined && quietFor < QUIET_MS) {
+    // They may go on talking. Look again once the quiet window has passed,
+    // as nothing else may change in the state to bring us back here.
+    $.clock.after(QUIET_MS - quietFor + 50, () => void deliverIdle($))
+    return
+  }
   const waiting = await takeHeard($)
   if (!hasAny(waiting)) return
   void $.prompt.submit({ text: idlePrompt(waiting), asUser: true })
@@ -312,14 +346,20 @@ export const register: Register = on => {
     return { ...r, context: [...(r.context ?? []), spokenNote(waiting)] }
   })
 
-  on('turn.start', ($, e, next) => {
-    if (e.agentId === undefined) turns.add(e.turnId)
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      turns.add(e.turnId)
+      await setWorking($)
+    }
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (turns.delete(e.turnId)) void deliverIdle($)
+    if (turns.delete(e.turnId)) {
+      await setWorking($)
+      void deliverIdle($)
+    }
     return r
   })
 
@@ -331,6 +371,16 @@ export const register: Register = on => {
     if (e.command && (e.command.name === 'voice-mode' || e.command.name.endsWith(':voice-mode'))) {
       await control($, 'start')
       openPane($)
+    }
+    // Opening the pane mid-question: open it here, so no prompt enters the queue
+    // and cuts the voice call short.
+    if (e.command && (e.command.name === 'voice-pane' || e.command.name.endsWith(':voice-pane'))) {
+      const s = await read($, voice)
+      if (s && LIVE.has(s.activity)) {
+        await poll($, true)
+        await $.ui.open({ id: PANE, title: TITLE })
+        return { drop: 'Voice pane opened.' }
+      }
     }
     if (e.command || e.isMeta || e.attachments?.length || !TYPED_ORIGINS.has(e.origin.kind) || !e.text.trim()) return next(e)
     const s = await read($, voice)
@@ -353,6 +403,7 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const n = await read($, tick)
     const a = ACTIVITY[s.activity]
+    const label = labelFor(s.activity, await read($, working))
     const asking = s.transcript.findLast(line => line.who === 'claude')
     const answer = s.transcript.findLast(line => line.who === 'user' && (!asking || line.id > asking.id))
     const inQuestion = s.activity === 'speaking' || s.awaitingReply
@@ -361,7 +412,7 @@ export const register: Register = on => {
       <Box key="voice-band" flexDirection="column">
         <Text>
           <Text bold color={a.color}>
-            {glyph(s.activity, n)} {a.label}
+            {glyph(s.activity, n)} {label}
           </Text>
           <Text dimColor>{round}</Text>
         </Text>
@@ -410,6 +461,9 @@ export const register: Register = on => {
     const live = s !== null && LIVE.has(s.activity)
     const activity = s?.activity ?? 'off'
     const a = ACTIVITY[activity]
+    const isWorking = await read($, working)
+    const label = labelFor(activity, isWorking)
+    const hint = live ? hintFor(activity, isWorking) : undefined
     const asking = s?.transcript.findLast(line => line.who === 'claude')
     const answer = s?.transcript.findLast(line => line.who === 'user' && (!asking || line.id > asking.id))
     const inQuestion = s !== null && (s.activity === 'speaking' || s.awaitingReply)
@@ -427,10 +481,10 @@ export const register: Register = on => {
         <Box key="head" flexDirection="column" gap="xs">
           <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
             <Box flexDirection="row" alignItems="center" gap="sm">
-              {Svg && <Svg key={`status-${activity}`} source={statusIcon(activity)} alt={a.label} width={24} height={18} />}
+              {Svg && <Svg key={`status-${activity}`} source={statusIcon(activity)} alt={label} width={24} height={18} />}
               <Text size="heading" weight="semibold" color={a.color}>
                 {Svg ? '' : `${glyph(activity, n)} `}
-                {a.label}
+                {label}
               </Text>
             </Box>
             {s?.sessionStartedAt !== undefined && (
@@ -439,6 +493,11 @@ export const register: Register = on => {
               </Text>
             )}
           </Box>
+          {hint && (
+            <Text key="call-hint" size="caption" dimColor>
+              {hint}
+            </Text>
+          )}
           {models &&
             (Svg ? (
               <Box key="models" flexDirection="row" flexWrap="wrap" gap="xs">

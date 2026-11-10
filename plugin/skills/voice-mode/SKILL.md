@@ -21,11 +21,11 @@ Pick, per question, how to ask it. Requirements are found by talking, not by a s
 **Quick confirmation**: you have a recommendation they will most likely take, and a yes, no or choice number settles it.
 
 - Several of these whose prerequisites are all settled go in one `voice_interview` round: the bridge asks each in turn and acknowledges each answer itself, so the person never waits on you between them. A single one goes through `voice_converse`.
-- Speak only the short version: the question in one sentence and the choice you recommend ("ข้อสอง แนะนำให้ส่งแจ้งเตือนเข้ากลุ่ม Lark ของสาขา ใช้ได้ไหมคะ"). Never read the choices out one by one.
+- Speak each question in full (see Speaking): what is decided, an example, every choice, your recommendation. A quick round is quick to answer, not quick to hear.
 
 **Open question**: how something should work, who does what, edge cases, a trade-off where their reasoning matters, or a reply that came back with a condition ("yes, with a condition: …") or a long explanation.
 
-- Talk it through with `voice_converse` and `discuss: true`. Ask it in one or two sentences, with your current thinking if you have some for them to react to.
+- Talk it through with `voice_converse` and `discuss: true`. Explain the open point in full, as for any question (see Speaking), with your current thinking if you have some for them to react to.
 - They may talk at length and pause to think; the bridge waits for them, and the reply comes back as said, without the quick answer check. Recognition may garble words in a long reply: read it for its meaning in context, and say back the terms that matter.
 - Follow up one question at a time, again with `discuss: true`, on what is unclear, missing, or at odds with an earlier decision. Before each follow-up, say in a sentence what you understood so far, so they can correct it.
 - Stop when you can state the decision in one sentence; then confirm it (see Deciding). Don't drag it out: two or three exchanges usually settle one point.
@@ -38,9 +38,23 @@ Both kinds:
 
 ## Speaking
 
-- Short, natural Thai: one sentence of about 15 words, two at most (in a discussion, a third to say back what you understood). Polite and consistent: the default voice (`marin`) speaks as a woman, so end with ค่ะ/คะ.
+The person listens to understand the decision, not to be reminded of a card they already read. So a question is spoken in full, the way Wayfinder wrote it, never a gist:
+
+1. What is being decided and why it matters now, in a sentence or two.
+2. A concrete example: the worked example from the ticket or card (numbers, a real case from their data), or one you make that shows what each choice would do.
+3. Every choice, by number ("ข้อหนึ่ง… ข้อสอง… ข้อสาม…"), each with what it means and its trade-off. Read all of them, not only the one you recommend.
+4. Your recommendation and the reason for it.
+5. End on the question itself ("…แนะนำข้อหนึ่ง ใช้ได้ไหมคะ"), so they know it is their turn.
+
+Example, for a card with three choices:
+
+> "ข้อสาม เรื่อง learned rules ของ Jev ค่ะ ตอนนี้ถ้าคน dismiss Lead Proposal ระบบยังไม่ได้เรียนรู้อะไรจากมัน ตัวอย่างเช่น สัปดาห์หนึ่งมี Proposal ถูก dismiss ยี่สิบห้าอัน สิบสองอันเพราะลูกค้าแค่ถามเฉยๆ สี่อันเพราะผิดรุ่น ทางเลือกมีสามข้อค่ะ ข้อหนึ่ง ยังไม่ทำตอนนี้ ให้ digest สรุปเหตุผลแล้วคนไปแก้ prompt เอง ข้อดีคือง่ายและคุมได้ ข้อเสียคือต้องมีคนคอยอ่าน ข้อสอง ให้ cron ทุกสัปดาห์สรุปเป็น rule อัตโนมัติ ข้อดีคือไม่ต้องมีคนทำ แต่เคสยังน้อย ลูกค้าแปลกๆ คนเดียวอาจกลายเป็น rule ได้ ข้อสาม ใส่ตัวอย่าง accepted กับ dismissed ล่าสุดยี่สิบอันเข้า prompt ทุกข้อความ ข้อเสียคือเปลือง token และ prompt เปลี่ยนทุกวัน แนะนำข้อหนึ่งค่ะ เพราะข้อมูลยังน้อยเกินจะให้ระบบสรุปเอง ใช้ข้อหนึ่งได้ไหมคะ"
+
+- Natural spoken Thai in short sentences, many of them rather than one long one, so it is easy to follow by ear. Polite and consistent: the default voice (`marin`) speaks as a woman, so end with ค่ะ/คะ.
 - English technical terms, product names and ticket names stay in English inside the Thai sentence.
-- Never speak code, tables, ticket bodies, URLs or issue numbers. Put them in `screen`.
+- Never speak code, URLs or issue numbers: say what they mean instead. Turn a table or list into spoken sentences ("ข้อหนึ่ง… ข้อดีคือ… ข้อเสียคือ…"); the card in `screen` keeps the exact layout.
+- The length is for questions and explanations. Confirmations, recaps, and "working on it" lines stay to one or two sentences.
+- The person may cut in at any point: speech stops and what they said is their reply (see Hearing).
 - The bridge already says a short "ค่ะ" the moment an answer is complete, and plays a soft tone while you take a while. Don't open your next turn with an acknowledgement of your own.
 
 ## Pace
@@ -51,7 +65,7 @@ Every second you spend between their reply and your next question is dead air fo
 
 - Answers may be a choice number ("ข้อสอง", "2", "อันแรก"), a yes to your recommendation, or free words. Map a number to the choice on that question's card.
 - Outside a discussion, the bridge checks each spoken reply against its question before moving on: noise or garbled words get "ขอโทษค่ะ ได้ยินไม่ชัด…" and are listened for again, an answer is confirmed aloud by a short ready clip ("ใช่ค่ะ", "ข้อสองนะคะ"), and a question back or another subject stops a `voice_interview` round and comes to you. Results say how each reply was understood ("Understood as: …"); trust that over a raw transcript that looks odd, and answer a question back before asking again (the unasked questions are listed). A question back ("…ทำอะไรนะ", "ทำไมต้อง…") always stops the round and comes to you: answer it, then ask that question again. When they carry on over the next question ("แต่ว่า…", "แล้วก็…"), the bridge adds it to the answer just given and asks the next question again; outside a round, the result says they added to their previous answer: update that answer in your notes. Inside a round the bridge itself goes back when they say an answer was misheard; when a result says a previous answer was heard wrong, say "เมื่อกี้น่าจะฟังผิดค่ะ", ask that question again, and fix your notes before going on.
-- "ฟังไม่ทัน", "อีกที", "อะไรนะ" and the like are no answer: the bridge asks the question again, a little slower, and returns only the real answer, with `repeats` saying how often it repeated. When a question needed repeats, make the next ones shorter.
+- "ฟังไม่ทัน", "อีกที", "อะไรนะ" and the like are no answer: the bridge asks the question again, a little slower, and returns only the real answer, with `repeats` saying how often it repeated. When a question needed repeats, say the next ones in plainer words, still with every choice.
 - Spoken answers are Thai speech recognition with English mixed in; terms can be misheard. When an answer contains a term that will land in the tracker (a ticket name, a product, an API), repeat it back in your confirmation.
 - Typed answers come back marked typed: take their words as written. Typed while you are working, an answer arrives as a normal message: treat it as their answer or new input, as you would a spoken one, and stay in voice mode.
 - When `voice_say` or `voice_converse` reports an interruption, stop the point you were making. What the person said is the new input; answer that.
@@ -91,5 +105,7 @@ After each decision, confirm it in one spoken sentence with `voice_converse` ("�
 ## Ending
 
 When the session's ticket is resolved, or the person says to stop, say a one-line Thai summary with `voice_say`, then call `voice_control` with `end` so the realtime session stops costing money.
+
+When the ticket is resolved (its resolution recorded and the issue closed, not merely paused or stopped), rename this session so the sidebar shows it is finished: `(Done)` first, then the ticket's issue number, then the session's name, e.g. "#84 Wayfinder: Learning from Proposal outcomes" becomes "(Done) #84 Wayfinder: Learning from Proposal outcomes". Keep the current name; add the issue number only if it is not there yet, and never add a second `(Done)`. In the Claude desktop app, use `set_session_title` with `session_id: "self"`; where no such tool exists (the terminal), write the line for them to run, `/rename (Done) #84 …`, on screen.
 
 Every time a voice session ends, write its estimated OpenAI cost on screen in one line, from the `voice_control` result: this session (minutes, total, speech and transcription), today and this month. When it ended without you (idle disconnect, the person's End button, a refresh), take the same line from `voice_status` the next time you write. Say it is an estimate; the real bill is on OpenAI's usage page.

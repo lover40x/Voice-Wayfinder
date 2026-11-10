@@ -193,8 +193,8 @@ server.registerTool(
   {
     title: 'Speak (Thai)',
     description:
-      'Speak a short text aloud to the person in Thai, through the realtime voice session. Interruptible: if they start talking, speech stops at once and the result says so. Use for summaries and confirmations that need no answer; use voice_converse for questions.',
-    inputSchema: { text: z.string().min(1).max(2000).describe('What to say, written in natural spoken Thai. No code, tables, markdown or URLs.') },
+      'Speak a text aloud to the person in Thai, through the realtime voice session. Interruptible: if they start talking, speech stops at once and the result says so. Use for summaries and confirmations that need no answer; use voice_converse for questions.',
+    inputSchema: { text: z.string().min(1).max(4000).describe('What to say, written in natural spoken Thai. No code, tables, markdown or URLs.') },
   },
   ({ text: t }, extra) => guarded(extra as Extra, () => session.say(t, extra.signal), r => text(describeSay(r), r)),
 )
@@ -218,7 +218,7 @@ server.registerTool(
     description:
       "Speak a question in Thai, then wait for the person's spoken reply and return its transcript. Handles barge-in: if they interrupt, speech stops and the interruption is treated as their reply. The main tool for grilling and decision turns. With discuss, the question is open: the person may explain at length and pause to think, and the reply comes back as said for you to follow up on.",
     inputSchema: {
-      text: z.string().min(1).max(2000).describe('One question, in short natural spoken Thai. No code, tables, lists or URLs.'),
+      text: z.string().min(1).max(4000).describe('One question, spoken in full in natural Thai: what is decided, an example, every choice with its trade-off, your recommendation, then the question. No code, tables or URLs.'),
       screen,
       timeoutSec,
       discuss: z
@@ -253,10 +253,10 @@ server.registerTool(
       "Ask a whole round of independent questions by voice, back to back: each is spoken, the person's reply is captured and acknowledged at once, then the next question follows with no wait for you. Returns every answer. Use it for a grilling round; use voice_converse for a single question or a follow-up that depends on an answer.",
     inputSchema: {
       questions: z
-        .array(z.string().min(1).max(600))
+        .array(z.string().min(1).max(4000))
         .min(1)
         .max(8)
-        .describe('Each question in short natural spoken Thai, worded so a yes accepts your recommendation. No code, tables, lists or URLs.'),
+        .describe('Each question spoken in full in natural Thai: what is decided, an example, every choice with its trade-off, your recommendation, then the question, worded so a yes accepts the recommendation. No code, tables or URLs.'),
       screen: screen.describe(
         'Markdown for the whole round, shown in the voice pane while it runs: each question numbered (Q1, Q2, …) with its choices and your recommendation. The pane marks which one is being asked.',
       ),

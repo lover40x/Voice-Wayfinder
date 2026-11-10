@@ -112,7 +112,10 @@ const THAI_NUMBERS = ['ศูนย์', 'หนึ่ง', 'สอง', 'สา
 
 /** Fixed spoken phrases for what was understood; each is a ready clip. */
 export const ECHO = {
-  yes: 'ใช่ค่ะ',
+  /** A yes to "…ได้ไหมคะ", "เอาแบบนี้ไหมคะ" and most questions: "OK, noted". */
+  yes: 'ได้ค่ะ',
+  /** A yes to "…ใช่ไหมคะ": mirrors the question. */
+  yesItIs: 'ใช่ค่ะ',
   no: 'ไม่ใช่นะคะ',
   choice: (n: number) => (n >= 1 && n <= 10 ? `ข้อ${THAI_NUMBERS[n]}นะคะ` : 'ค่ะ'),
   /** Noise or garbled words: asked once more, without reading the question again. */
@@ -125,8 +128,16 @@ export const ECHO = {
   change: 'ได้ค่ะ งั้นถามใหม่นะคะ',
 } as const
 
+/** Asked "…ใช่ไหม" (or "ใช่หรือเปล่า"): a yes is confirmed with ใช่; anything else with ได้. */
+const ASKS_IS_IT = /ใช่(?:ไหม|มั้ย|ไม๊|หรือเปล่า|รึเปล่า|หรือไม่)\s*(?:คะ|ครับ|ค่ะ|คับ|นะ)*\s*[?？]?\s*$/
+
+/** The confirmation of a plain yes to this question: "ได้ค่ะ", or "ใช่ค่ะ" to a "…ใช่ไหม". */
+export function yesEcho(question: string): string {
+  return ASKS_IS_IT.test(question.trim()) ? ECHO.yesItIs : ECHO.yes
+}
+
 /** Every fixed phrase, rendered as clips when voice connects. */
-export const ECHO_CLIPS: readonly string[] = [ECHO.yes, ECHO.no, ECHO.unclear, ECHO.correction, ECHO.keep, ECHO.change, ...Array.from({ length: 8 }, (_, i) => ECHO.choice(i + 1))]
+export const ECHO_CLIPS: readonly string[] = [ECHO.yes, ECHO.yesItIs, ECHO.no, ECHO.unclear, ECHO.correction, ECHO.keep, ECHO.change, ...Array.from({ length: 8 }, (_, i) => ECHO.choice(i + 1))]
 
 const KINDS = [
   ['yes', 'Yes: agrees with the question exactly as it was asked (ใช่, ได้, โอเค, ถูก, เอา), even with extra words after it ("ใช่ ไม่ต้องถามใหม่"). Negative words inside the question ("โดยไม่ถาม Jev") do not flip it.'],
@@ -324,9 +335,9 @@ function readKind(answers: readonly DecisionAnswer[], r: UnderstandRequest & { q
   const n = picked ? Number(picked.value) : undefined
   switch (kind) {
     case 'yes':
-      // A yes with a condition is not a plain "ใช่ค่ะ": keep their words, acknowledge plainly.
+      // A yes with a condition is not a plain "ได้ค่ะ": keep their words, acknowledge plainly.
       if (HEDGE.test(heard)) return { kind: 'answer', answer: `yes, with a condition: ${r.heard.trim()}`, echo: '' }
-      return { kind: 'answer', answer: picked ? `yes (${picked.value}. ${picked.description})` : 'yes', echo: ECHO.yes }
+      return { kind: 'answer', answer: picked ? `yes (${picked.value}. ${picked.description})` : 'yes', echo: yesEcho(r.question) }
     case 'no':
       return { kind: 'answer', answer: 'no', echo: ECHO.no }
     case 'choice':

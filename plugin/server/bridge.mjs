@@ -40690,7 +40690,10 @@ function parseUnderstanding(text2) {
 }
 var THAI_NUMBERS = ["\u0E28\u0E39\u0E19\u0E22\u0E4C", "\u0E2B\u0E19\u0E36\u0E48\u0E07", "\u0E2A\u0E2D\u0E07", "\u0E2A\u0E32\u0E21", "\u0E2A\u0E35\u0E48", "\u0E2B\u0E49\u0E32", "\u0E2B\u0E01", "\u0E40\u0E08\u0E47\u0E14", "\u0E41\u0E1B\u0E14", "\u0E40\u0E01\u0E49\u0E32", "\u0E2A\u0E34\u0E1A"];
 var ECHO = {
-  yes: "\u0E43\u0E0A\u0E48\u0E04\u0E48\u0E30",
+  /** A yes to "…ได้ไหมคะ", "เอาแบบนี้ไหมคะ" and most questions: "OK, noted". */
+  yes: "\u0E44\u0E14\u0E49\u0E04\u0E48\u0E30",
+  /** A yes to "…ใช่ไหมคะ": mirrors the question. */
+  yesItIs: "\u0E43\u0E0A\u0E48\u0E04\u0E48\u0E30",
   no: "\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E19\u0E30\u0E04\u0E30",
   choice: (n) => n >= 1 && n <= 10 ? `\u0E02\u0E49\u0E2D${THAI_NUMBERS[n]}\u0E19\u0E30\u0E04\u0E30` : "\u0E04\u0E48\u0E30",
   /** Noise or garbled words: asked once more, without reading the question again. */
@@ -40702,7 +40705,11 @@ var ECHO = {
   /** They want to change it: the question follows. */
   change: "\u0E44\u0E14\u0E49\u0E04\u0E48\u0E30 \u0E07\u0E31\u0E49\u0E19\u0E16\u0E32\u0E21\u0E43\u0E2B\u0E21\u0E48\u0E19\u0E30\u0E04\u0E30"
 };
-var ECHO_CLIPS = [ECHO.yes, ECHO.no, ECHO.unclear, ECHO.correction, ECHO.keep, ECHO.change, ...Array.from({ length: 8 }, (_, i) => ECHO.choice(i + 1))];
+var ASKS_IS_IT = /ใช่(?:ไหม|มั้ย|ไม๊|หรือเปล่า|รึเปล่า|หรือไม่)\s*(?:คะ|ครับ|ค่ะ|คับ|นะ)*\s*[?？]?\s*$/;
+function yesEcho(question) {
+  return ASKS_IS_IT.test(question.trim()) ? ECHO.yesItIs : ECHO.yes;
+}
+var ECHO_CLIPS = [ECHO.yes, ECHO.yesItIs, ECHO.no, ECHO.unclear, ECHO.correction, ECHO.keep, ECHO.change, ...Array.from({ length: 8 }, (_, i) => ECHO.choice(i + 1))];
 var KINDS = [
   ["yes", 'Yes: agrees with the question exactly as it was asked (\u0E43\u0E0A\u0E48, \u0E44\u0E14\u0E49, \u0E42\u0E2D\u0E40\u0E04, \u0E16\u0E39\u0E01, \u0E40\u0E2D\u0E32), even with extra words after it ("\u0E43\u0E0A\u0E48 \u0E44\u0E21\u0E48\u0E15\u0E49\u0E2D\u0E07\u0E16\u0E32\u0E21\u0E43\u0E2B\u0E21\u0E48"). Negative words inside the question ("\u0E42\u0E14\u0E22\u0E44\u0E21\u0E48\u0E16\u0E32\u0E21 Jev") do not flip it.'],
   ["no", "No: disagrees (\u0E44\u0E21\u0E48, \u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48, \u0E44\u0E21\u0E48\u0E40\u0E2D\u0E32)."],
@@ -40831,7 +40838,7 @@ function readKind(answers, r, minConfidence) {
   switch (kind) {
     case "yes":
       if (HEDGE.test(heard)) return { kind: "answer", answer: `yes, with a condition: ${r.heard.trim()}`, echo: "" };
-      return { kind: "answer", answer: picked ? `yes (${picked.value}. ${picked.description})` : "yes", echo: ECHO.yes };
+      return { kind: "answer", answer: picked ? `yes (${picked.value}. ${picked.description})` : "yes", echo: yesEcho(r.question) };
     case "no":
       return { kind: "answer", answer: "no", echo: ECHO.no };
     case "choice":
@@ -41882,8 +41889,8 @@ var VoiceSession = class {
     return {
       items: r.questions.map((question, k) => {
         const a = r.answers[k];
-        if (!a || a.status === "navigated") return { question, status: "pending" };
-        if (a.status === "skipped") return { question, status: "skipped" };
+        if (a?.status === "skipped") return { question, status: "skipped" };
+        if (a?.status !== "replied") return { question, status: "pending" };
         return { question, status: "answered", answer: spokenAnswer(a.understood, a.answer) };
       }),
       ...r.current !== void 0 ? { current: r.current } : {},
@@ -42595,8 +42602,8 @@ server.registerTool(
   "voice_say",
   {
     title: "Speak (Thai)",
-    description: "Speak a short text aloud to the person in Thai, through the realtime voice session. Interruptible: if they start talking, speech stops at once and the result says so. Use for summaries and confirmations that need no answer; use voice_converse for questions.",
-    inputSchema: { text: external_exports.string().min(1).max(2e3).describe("What to say, written in natural spoken Thai. No code, tables, markdown or URLs.") }
+    description: "Speak a text aloud to the person in Thai, through the realtime voice session. Interruptible: if they start talking, speech stops at once and the result says so. Use for summaries and confirmations that need no answer; use voice_converse for questions.",
+    inputSchema: { text: external_exports.string().min(1).max(4e3).describe("What to say, written in natural spoken Thai. No code, tables, markdown or URLs.") }
   },
   ({ text: t }, extra) => guarded(extra, () => session.say(t, extra.signal), (r) => text(describeSay(r), r))
 );
@@ -42615,7 +42622,7 @@ server.registerTool(
     title: "Ask by voice",
     description: "Speak a question in Thai, then wait for the person's spoken reply and return its transcript. Handles barge-in: if they interrupt, speech stops and the interruption is treated as their reply. The main tool for grilling and decision turns. With discuss, the question is open: the person may explain at length and pause to think, and the reply comes back as said for you to follow up on.",
     inputSchema: {
-      text: external_exports.string().min(1).max(2e3).describe("One question, in short natural spoken Thai. No code, tables, lists or URLs."),
+      text: external_exports.string().min(1).max(4e3).describe("One question, spoken in full in natural Thai: what is decided, an example, every choice with its trade-off, your recommendation, then the question. No code, tables or URLs."),
       screen,
       timeoutSec,
       discuss: external_exports.boolean().optional().describe("An open question to talk through (requirements, how something should work), not a yes/no: waits through longer thinking pauses and skips the quick answer check.")
@@ -42643,7 +42650,7 @@ server.registerTool(
     title: "Ask a round by voice",
     description: "Ask a whole round of independent questions by voice, back to back: each is spoken, the person's reply is captured and acknowledged at once, then the next question follows with no wait for you. Returns every answer. Use it for a grilling round; use voice_converse for a single question or a follow-up that depends on an answer.",
     inputSchema: {
-      questions: external_exports.array(external_exports.string().min(1).max(600)).min(1).max(8).describe("Each question in short natural spoken Thai, worded so a yes accepts your recommendation. No code, tables, lists or URLs."),
+      questions: external_exports.array(external_exports.string().min(1).max(4e3)).min(1).max(8).describe("Each question spoken in full in natural Thai: what is decided, an example, every choice with its trade-off, your recommendation, then the question, worded so a yes accepts the recommendation. No code, tables or URLs."),
       screen: screen.describe(
         "Markdown for the whole round, shown in the voice pane while it runs: each question numbered (Q1, Q2, \u2026) with its choices and your recommendation. The pane marks which one is being asked."
       ),

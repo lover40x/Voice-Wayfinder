@@ -66,7 +66,9 @@ function bridge(on: On, state: VoiceStateV1, calls: Call[], acceptsTyped = true,
     calls.push({ tool: e.tool, args: e.args })
     const body =
       e.tool === 'voice_status'
-        ? state
+        ? e.args.sinceRev === state.rev
+          ? { v: 1, rev: state.rev, unchanged: true }
+          : state
         : e.args.action === 'type'
           ? { message: 'typed', accepted: acceptsTyped }
           : e.args.action === 'take'
@@ -93,6 +95,7 @@ function take(state: VoiceStateV1) {
   state.queuedUtterances = 0
   delete state.recapDueAfterMs
   delete state.revisitDue
+  if (heard.length || pausedMs !== undefined || revisit) state.rev++
   return {
     message: 'took',
     accepted: heard.length > 0 || pausedMs !== undefined || revisit !== undefined,
@@ -352,10 +355,61 @@ test('a voice question takes the words itself, so its result gets no note', asyn
 test('what the person says while Claude is idle starts a turn in their own words', async ($, on) => {
   const prompts: string[] = []
   const clock = mock.clock(on)
+  await clock.set(60_000)
   bridge(on, WORKING(), [], true, [], prompts)
   await $.command.run(OPEN_PANE)
   await clock.settle()
   expect(prompts).toEqual(['🎙 ใน system context ไม่ได้บอกไว้เหรอ'])
+})
+
+test('words heard just now reach an idle Claude once the quiet window passed, with no other change', async ($, on) => {
+  const prompts: string[] = []
+  const clock = mock.clock(on)
+  const state = WORKING()
+  state.transcript = state.transcript.map(l => (l.id === 4 ? { ...l, at: clock.now() } : l))
+  bridge(on, state, [], true, [], prompts)
+  await $.command.run(OPEN_PANE)
+  await clock.settle()
+  // Still within the quiet window: they may go on talking.
+  expect(prompts).toEqual([])
+  await clock.advance(2000)
+  expect(prompts).toEqual(['🎙 ใน system context ไม่ได้บอกไว้เหรอ'])
+})
+
+test('/voice-pane during a voice call opens the pane without a prompt that would cut the call', async ($, on) => {
+  const opened: string[] = []
+  const prompts: string[] = []
+  bridge(on, STATE, [], true, opened, prompts)
+  await $.command.run(OPEN_PANE)
+  opened.length = 0
+  const r = await $.prompt.submit({ ...typedPrompt('/voice-pane'), command: { name: 'voice-pane', args: '' } })
+  expect('drop' in r && r.drop).toBe('Voice pane opened.')
+  expect(opened).toContain('voice-pane')
+  expect(prompts).toEqual([])
+})
+
+test('with no voice call waiting the pane says what Claude is doing, never just "Connected"', async ($, on) => {
+  bridge(on, { ...WORKING(), queuedUtterances: 0 }, [])
+  await $.command.run(OPEN_PANE)
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Claude idle/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /speak or type and Claude picks it up/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Connected/ })).toBeUndefined()
+  await ui.unmount()
+  await $.turn.start({ text: 'build it', turnId: 't1' })
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Claude working/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /at its next step/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('while Claude waits on a voice question the pane says Listening, with no hint', async ($, on) => {
+  bridge(on, STATE, [])
+  await $.command.run(OPEN_PANE)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Listening/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Not on a voice call/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('while paused the pane offers Resume and says Claude waits', async ($, on) => {

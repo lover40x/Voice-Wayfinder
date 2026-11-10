@@ -746,8 +746,9 @@ export class VoiceSession {
     return {
       items: r.questions.map((question, k) => {
         const a = r.answers[k]
-        if (!a || a.status === 'navigated') return { question, status: 'pending' as const }
-        if (a.status === 'skipped') return { question, status: 'skipped' as const }
+        if (a?.status === 'skipped') return { question, status: 'skipped' as const }
+        // Cut short (the call stopped, voice ended, a timeout): still open, not answered.
+        if (a?.status !== 'replied') return { question, status: 'pending' as const }
         return { question, status: 'answered' as const, answer: spokenAnswer(a.understood, a.answer) }
       }),
       ...(r.current !== undefined ? { current: r.current } : {}),

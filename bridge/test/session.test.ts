@@ -906,7 +906,12 @@ test('the Decisions answers become an understanding with a fixed confirmation', 
     answer: '2. Whole Lark group',
     echo: 'ข้อสองนะคะ',
   })
-  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes' }], req)?.echo, 'ใช่ค่ะ')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes' }], req)?.echo, 'ได้ค่ะ')
+  // The confirmation follows the question: "ใช้ได้ไหม" → ได้ค่ะ, "…ใช่ไหม" → ใช่ค่ะ.
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes' }], { question: 'ข้อหนึ่ง แนะนำข้อสอง ใช้ได้ไหมคะ', heard: 'ได้' })?.echo, 'ได้ค่ะ')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes' }], { question: 'สรุปว่าใช้ GitHub Issues ถูกไหมคะ', heard: 'ถูก' })?.echo, 'ได้ค่ะ')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes' }], { question: 'ข้อสาม คนแก้ prompt เอง ใช่ไหมคะ', heard: 'ใช่' })?.echo, 'ใช่ค่ะ')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes' }], { question: 'ต้องเตือนก่อนลบใช่หรือเปล่าคะ?', heard: 'ใช่' })?.echo, 'ใช่ค่ะ')
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'unclear' }], req)?.kind, 'unclear')
   assert.equal(readDecisions([{ type: 'refusal', name: 'kind' }], req), undefined)
   // Noise reads as a low-confidence answer ("แม่จ๋า มากจัง" → yes at 0.12): asked again.
@@ -987,8 +992,8 @@ test('a yes-with-a-condition split between kinds is still an answer, with its wo
   const hedged = readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.44 }], { ...req, heard })
   assert.deepEqual(hedged, { kind: 'answer', answer: `yes, with a condition: ${heard}`, echo: '', confidence: 0.44 })
   assert.equal(spokenAnswer(hedged, heard), heard)
-  // A plain yes is still "ใช่ค่ะ".
-  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.9 }], { ...req, heard: 'ใช่ ไม่ต้องถามใหม่' })?.echo, 'ใช่ค่ะ')
+  // A plain yes to "ใช้ได้ไหม" is still confirmed, as "ได้ค่ะ".
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.9 }], { ...req, heard: 'ใช่ ไม่ต้องถามใหม่' })?.echo, 'ได้ค่ะ')
 })
 
 test('a long explanation is never taken for noise, and a garbled "ทวนคำถาม" repeats', async () => {
@@ -1260,4 +1265,18 @@ test('"แต่ว่า…" spoken over the next question is added to the answ
   assert.equal(r.answers[0]?.answer, 'ใช้ได้ แต่ว่าต้องเตือนก่อนลบ')
   assert.equal(r.answers[0]?.understood?.answer, 'yes, with a condition: ใช้ได้ แต่ว่าต้องเตือนก่อนลบ')
   assert.equal(r.answers[1]?.answer, 'ใช้ได้')
+})
+
+test('a voice call stopped mid-question leaves that question open in the pane, not ticked', async () => {
+  const { provider, session } = setup()
+  const stop = new AbortController()
+  const round = session.interview(['ข้อหนึ่ง', 'ข้อสอง'], 5000, stop.signal)
+  await tick()
+  provider.emit({ type: 'speech.audio', speechId: 's1', pcm: Buffer.alloc(4800) })
+  await tick()
+  stop.abort()
+  const r = await round
+  assert.equal(r.answers[0]?.status, 'cancelled')
+  const items = (session.state() as VoiceStateV1).round?.items
+  assert.deepEqual(items?.map(i => i.status), ['pending', 'pending'])
 })

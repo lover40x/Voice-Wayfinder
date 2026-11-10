@@ -136,6 +136,8 @@ declare module 'claude-code' {
       link: BridgeLink
       /** Animation frame counter, advanced only while voice is on. */
       tick: number
+      /** Whether Claude's main loop is working on a turn. */
+      working: boolean
     }
   }
 }
