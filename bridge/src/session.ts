@@ -149,8 +149,10 @@ const PLAIN_WORDS = new Set(
 export function vocabularyFrom(text: string): string[] {
   const plain = text.replace(/`[^`]*`|https?:\/\/\S+/g, ' ').replace(/[*_#>|[\]()]/g, ' ')
   const out: string[] = []
-  for (const m of plain.matchAll(/[A-Za-z][A-Za-z0-9+.#-]*(?:\s+[A-Z][A-Za-z0-9+.#-]*)*/g)) {
-    const term = m[0].replace(/^Q\d+\s+/, '').replace(/[.-]+$/, '').trim()
+  // Words join across spaces only: a line break ends a term ("Repair Status" and
+  // "Warranty Claim" on two list lines are two), and OpenAI refuses a keyword with one.
+  for (const m of plain.matchAll(/[A-Za-z][A-Za-z0-9+.#-]*(?:[ \t]+[A-Z][A-Za-z0-9+.#-]*)*/g)) {
+    const term = m[0].replace(/^Q\d+\s+/, '').replace(/[.-]+$/, '').replace(/\s+/g, ' ').trim()
     if (term.length < 3 || term.length > 40 || PLAIN_WORDS.has(term.toLowerCase())) continue
     if (/^Q\d+$/.test(term)) continue
     if (/^[a-z]/.test(term) && !/[ก-๙]\s*$/.test(plain.slice(0, m.index)) && !/^\s*[ก-๙]/.test(plain.slice(m.index + m[0].length))) continue

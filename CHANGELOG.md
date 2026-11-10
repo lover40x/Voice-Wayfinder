@@ -4,6 +4,8 @@ All notable changes to the voice-wayfinder plugin. Versions follow semantic vers
 
 ## Unreleased
 
+- Claude's speech costs about a third: the voice now speaks with `gpt-realtime-2.1-mini` ($20 per million audio tokens, was `gpt-realtime-2.1` at $64). It only reads Claude's script aloud, and does so word for word like the full model, starting a little sooner; a question read in full costs about $0.03 a minute instead of $0.10 (a 7.8-minute session that cost $0.46 would cost about $0.14). Speech is now priced by model (`openai.speechPricingUsd`), so the estimate stays right if you set `openai.model` back to `gpt-realtime-2.1`.
+- Fixed: "OpenAI Realtime: The 'keywords' parameter contains unsupported characters." Capitalised words on two lines of a card ("Warranty Claim" / "Parts Order") were joined into one recognition hint with a line break in it, which OpenAI refuses, and with it the whole hint update for that question. Terms now end at a line break, and every hint is sent on one line.
 - The voice status no longer says "Connected" when no voice call from Claude is waiting: that only meant the OpenAI connection was open, and read as "Claude hears me". It now says "Claude working" (what you say reaches it at its next step) or "Claude idle" (speak or type and it picks it up), with that line under the status in the pane; "Listening" and "Claude speaking" mean a voice call is on.
 - A yes is confirmed with "ได้ค่ะ", which fits "…ใช้ได้ไหมคะ", "เอาแบบนี้ไหมคะ" and most questions; "ใช่ค่ะ" is kept for a question ending "…ใช่ไหมคะ" or "ใช่หรือเปล่าคะ". Both are ready clips.
 - When the session's ticket is resolved, Claude renames the session "(Done) #<issue> <name>" (in the desktop app; in the terminal it shows the `/rename` line to run).

@@ -40941,6 +40941,9 @@ var READ_ALOUD = [
   "Do not translate, summarise, answer, comment or add anything before or after it."
 ].join(" ");
 var SLOWER = " The person asked to hear it again: read it a little slower and very clearly this time.";
+function keywordsFrom(terms) {
+  return [...new Set(terms.map((t) => t.replace(/\s+/g, " ").trim()).filter(Boolean))].slice(0, 80);
+}
 var OpenAIRealtimeProvider = class {
   name = "openai-realtime";
   model;
@@ -41145,12 +41148,13 @@ ${text2}
     const out = { model };
     if (model === "gpt-live-transcribe" || model === "gpt-transcribe") out.languages = [language];
     else out.language = language;
-    if (this.vocabulary.length && (model === "gpt-transcribe" || model === "gpt-live-transcribe")) out.keywords = this.vocabulary.slice(0, 80);
+    if (this.vocabulary.length && (model === "gpt-transcribe" || model === "gpt-live-transcribe")) out.keywords = keywordsFrom(this.vocabulary);
     if (prompt && model !== "gpt-realtime-whisper") out.prompt = prompt;
     return out;
   }
   handle(msg) {
     const pricing = this.cfg.pricingUsd;
+    const speech = this.cfg.speechPricingUsd?.[this.cfg.model] ?? pricing;
     switch (msg.type) {
       case "response.created": {
         const speechId = msg.response?.metadata?.speech_id;
@@ -41180,7 +41184,7 @@ ${text2}
           this.emit({
             type: "usage",
             kind: "speech",
-            costUsd: (textIn * pricing.textInPerMTok + audioOut * pricing.audioOutPerMTok + textOut * pricing.textOutPerMTok) / 1e6
+            costUsd: (textIn * speech.textInPerMTok + audioOut * speech.audioOutPerMTok + textOut * speech.textOutPerMTok) / 1e6
           });
         }
         if (!p) return;
@@ -41355,8 +41359,8 @@ var PLAIN_WORDS = new Set(
 function vocabularyFrom(text2) {
   const plain = text2.replace(/`[^`]*`|https?:\/\/\S+/g, " ").replace(/[*_#>|[\]()]/g, " ");
   const out = [];
-  for (const m of plain.matchAll(/[A-Za-z][A-Za-z0-9+.#-]*(?:\s+[A-Z][A-Za-z0-9+.#-]*)*/g)) {
-    const term = m[0].replace(/^Q\d+\s+/, "").replace(/[.-]+$/, "").trim();
+  for (const m of plain.matchAll(/[A-Za-z][A-Za-z0-9+.#-]*(?:[ \t]+[A-Z][A-Za-z0-9+.#-]*)*/g)) {
+    const term = m[0].replace(/^Q\d+\s+/, "").replace(/[.-]+$/, "").replace(/\s+/g, " ").trim();
     if (term.length < 3 || term.length > 40 || PLAIN_WORDS.has(term.toLowerCase())) continue;
     if (/^Q\d+$/.test(term)) continue;
     if (/^[a-z]/.test(term) && !/[ก-๙]\s*$/.test(plain.slice(0, m.index)) && !/^\s*[ก-๙]/.test(plain.slice(m.index + m[0].length))) continue;

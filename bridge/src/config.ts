@@ -17,6 +17,8 @@ export type OpenAIConfig = {
   turnDetection: TurnDetection
   noiseReduction: 'near_field' | 'far_field' | null
   pricingUsd: { textInPerMTok: number; audioOutPerMTok: number; textOutPerMTok: number; transcriptionPerMin: number }
+  /** Speech prices by realtime model; a model not listed falls back to pricingUsd. */
+  speechPricingUsd?: Record<string, { textInPerMTok: number; audioOutPerMTok: number; textOutPerMTok: number }>
   /** A small text model that checks each spoken reply before a round moves on (bridge/src/understand.ts). */
   understanding?: {
     enabled: boolean

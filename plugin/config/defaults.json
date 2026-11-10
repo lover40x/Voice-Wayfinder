@@ -1,7 +1,7 @@
 {
   "provider": "openai-realtime",
   "openai": {
-    "model": "gpt-realtime-2.1",
+    "model": "gpt-realtime-2.1-mini",
     "voice": "marin",
     "speed": 1.2,
     "reasoningEffort": "minimal",
@@ -30,6 +30,10 @@
       "audioOutPerMTok": 64,
       "textOutPerMTok": 16,
       "transcriptionPerMin": 0.017
+    },
+    "speechPricingUsd": {
+      "gpt-realtime-2.1": { "textInPerMTok": 4, "audioOutPerMTok": 64, "textOutPerMTok": 16 },
+      "gpt-realtime-2.1-mini": { "textInPerMTok": 0.6, "audioOutPerMTok": 20, "textOutPerMTok": 2.4 }
     }
   },
   "audio": {

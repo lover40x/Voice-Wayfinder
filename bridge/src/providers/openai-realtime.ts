@@ -28,6 +28,14 @@ type Pending = {
   clip?: { chunks: Buffer[]; resolve: (pcm: Buffer) => void; reject: (err: Error) => void }
 }
 
+/**
+ * Recognition hints as OpenAI takes them: one line each (a line break makes it
+ * refuse the whole session.update), no blanks or repeats, 80 at most.
+ */
+export function keywordsFrom(terms: readonly string[]): string[] {
+  return [...new Set(terms.map(t => t.replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 80)
+}
+
 /** OpenAI Realtime (GA) over WebSocket: server VAD, no automatic replies, out-of-band speech. */
 export class OpenAIRealtimeProvider implements VoiceProvider {
   readonly name = 'openai-realtime'
@@ -256,13 +264,15 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
     else out.language = language
     // Vocabulary goes only to models with a keywords field. A word list in
     // `prompt` gets transcribed back verbatim when the mic hears only noise.
-    if (this.vocabulary.length && (model === 'gpt-transcribe' || model === 'gpt-live-transcribe')) out.keywords = this.vocabulary.slice(0, 80)
+    if (this.vocabulary.length && (model === 'gpt-transcribe' || model === 'gpt-live-transcribe')) out.keywords = keywordsFrom(this.vocabulary)
     if (prompt && model !== 'gpt-realtime-whisper') out.prompt = prompt
     return out
   }
 
   private handle(msg: ServerEvent) {
     const pricing = this.cfg.pricingUsd
+    // Speech is priced by the model that speaks; the flat prices are the fallback.
+    const speech = this.cfg.speechPricingUsd?.[this.cfg.model] ?? pricing
     switch (msg.type) {
       case 'response.created': {
         const speechId = msg.response?.metadata?.speech_id
@@ -292,7 +302,7 @@ export class OpenAIRealtimeProvider implements VoiceProvider {
           this.emit({
             type: 'usage',
             kind: 'speech',
-            costUsd: (textIn * pricing.textInPerMTok + audioOut * pricing.audioOutPerMTok + textOut * pricing.textOutPerMTok) / 1e6,
+            costUsd: (textIn * speech.textInPerMTok + audioOut * speech.audioOutPerMTok + textOut * speech.textOutPerMTok) / 1e6,
           })
         }
         if (!p) return

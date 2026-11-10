@@ -1280,3 +1280,34 @@ test('a voice call stopped mid-question leaves that question open in the pane, n
   const items = (session.state() as VoiceStateV1).round?.items
   assert.deepEqual(items?.map(i => i.status), ['pending', 'pending'])
 })
+
+test('a term never runs across a line break, and keywords go to OpenAI one line each', async () => {
+  const { vocabularyFrom } = await import('../src/session.ts')
+  const { keywordsFrom } = await import('../src/providers/openai-realtime.ts')
+  const card = '**Q2. After-sales intents**\n- Repair Status\n- Warranty Claim\nParts Order และ After-Sales Follow-up'
+  const terms = vocabularyFrom(card)
+  assert.ok(terms.includes('Repair Status') && terms.includes('Warranty Claim'), terms.join(' | '))
+  assert.ok(terms.every(t => !/\n/.test(t)), terms.join(' | '))
+  assert.deepEqual(keywordsFrom(['Repair Status\nWarranty Claim', ' Owned  Unit ', 'Owned Unit', '', 'CRM#88']), ['Repair Status Warranty Claim', 'Owned Unit', 'CRM#88'])
+})
+
+test("Claude's speech is priced by the model that speaks", async () => {
+  const { OpenAIRealtimeProvider } = await import('../src/providers/openai-realtime.ts')
+  const { loadConfig } = await import('../src/config.ts')
+  // The plugin's defaults, not a personal config on this machine.
+  process.env.VOICE_WAYFINDER_CONFIG = join(tmpdir(), 'no-voice-wayfinder-config.json')
+  const base = loadConfig(join(import.meta.dirname, '..', '..', 'plugin')).openai
+  const costOf = (model: string) => {
+    const p = new OpenAIRealtimeProvider({ ...base, model }, 'test')
+    let usd = 0
+    p.onEvent(e => {
+      if (e.type === 'usage' && e.kind === 'speech') usd += e.costUsd
+    })
+    ;(p as unknown as { handle(m: unknown): void }).handle({ type: 'response.done', response: { usage: { input_tokens: 0, output_token_details: { audio_tokens: 1_000_000, text_tokens: 0 } } } })
+    return usd
+  }
+  assert.equal(base.model, 'gpt-realtime-2.1-mini')
+  assert.equal(costOf('gpt-realtime-2.1-mini'), 20)
+  assert.equal(costOf('gpt-realtime-2.1'), 64)
+  assert.equal(costOf('some-new-model'), 64)
+})
