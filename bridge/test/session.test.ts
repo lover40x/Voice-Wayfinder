@@ -985,7 +985,7 @@ test('a yes-with-a-condition split between kinds is still an answer, with its wo
   // A yes with "แต่…" keeps the condition and is not confirmed as a bare "ใช่ค่ะ".
   const heard = 'ใช่ได้ แต่ว่าถ้าเกิดพนักงานแอดเองก็ยังต้องแอดได้'
   const hedged = readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.44 }], { ...req, heard })
-  assert.deepEqual(hedged, { kind: 'answer', answer: `yes, with a condition: ${heard}`, echo: '' })
+  assert.deepEqual(hedged, { kind: 'answer', answer: `yes, with a condition: ${heard}`, echo: '', confidence: 0.44 })
   assert.equal(spokenAnswer(hedged, heard), heard)
   // A plain yes is still "ใช่ค่ะ".
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.9 }], { ...req, heard: 'ใช่ ไม่ต้องถามใหม่' })?.echo, 'ใช่ค่ะ')
@@ -998,7 +998,7 @@ test('a long explanation is never taken for noise, and a garbled "ทวนค�
   // Seen live: a coherent explanation with a few misheard words got "ได้ยินไม่ชัด" twice.
   const heard =
     'เวลาที่เรา เปลี่ยนเมนโปรไฟล์ แอสซิสแตนท์ลิงก์มันจะไม่ต่อกับซีเรียลนั้นแล้ว แต่ว่ามันควรจะยังต่อกับเมนโปรไฟล์อันเดิมอยู่'
-  assert.deepEqual(readDecisions(unclear, { question, heard }), { kind: 'answer', answer: heard, echo: '' })
+  assert.deepEqual(readDecisions(unclear, { question, heard }), { kind: 'answer', answer: heard, echo: '', confidence: 0.5 })
   assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'free_answer', confidence: 0.2 }], { question, heard })?.kind, 'answer')
   // Short noise and a short aside to someone else are still asked again.
   for (const h of ['เหรอ', 'เฮ้ย', 'เขาก็อยากจะกลับไปเรียนเหมือนกัน', 'แม่จ๋า มากจัง']) assert.equal(readDecisions(unclear, { question, heard: h })?.kind, 'unclear', h)
@@ -1212,4 +1212,52 @@ test('a discussion waits through longer pauses and goes to Claude as said, unche
   assert.equal(provider.understood.length, 0, 'no answer check in a discussion')
   assert.equal(r.repeats, 0)
   session.control('end')
+})
+
+test('a question asked back is a question, whatever kind the model guessed', async () => {
+  const { asksBack, readDecisions } = await import('../src/understand.ts')
+  for (const t of ['จะให้แจงมาทำอะไรนะ', 'ทำไมต้องมีกดปุ่มด้วยนะ', 'อันนี้คือยังไงนะ', 'หมายถึงแจ้งทุกครั้งเลยเหรอ', 'แจ้งไปให้ใครนะ', 'ใช้ได้ไหมนะ ไม่แน่ใจ', 'เก็บกี่วัน'])
+    assert.equal(asksBack(t), true, t)
+  for (const t of ['ใช้ได้', 'อะไรก็ได้', 'ว่าอะไรนะ', 'อะไรนะครับ', 'ทวนคำถามให้หน่อย', 'ใช่ ไม่ต้องถามใหม่', 'ไม่หรอก', 'ถูกต้อง'])
+    assert.equal(asksBack(t), false, t)
+  const question = 'ข้อสาม แนะนำให้แจ้งทั้งตอน lifecycle stage เปลี่ยน ใช้ได้ไหมคะ'
+  // Seen live as yes ("ใช่ค่ะ", next question), and as repeat and comment in probes.
+  for (const choice of ['yes', 'repeat', 'comment'])
+    assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice, confidence: 0.3 }], { question, heard: 'จะให้แจงมาทำอะไรนะ' })?.kind, 'question', choice)
+  // Noise the model calls unclear stays unclear; a yes that opens the reply stays an answer.
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'unclear', confidence: 0.5 }], { question, heard: 'ใช่ไหมอเมริกา' })?.kind, 'unclear')
+  assert.equal(readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.6 }], { question, heard: 'ใช้ได้ แต่ทำไมต้องแจ้งทุกครั้ง' })?.kind, 'answer')
+  // "ถูกต้อง" is a plain yes however unsure the model is; its confidence is kept for the log.
+  const right = readDecisions([{ type: 'choice', name: 'kind', choice: 'yes', confidence: 0.39 }], { question, heard: 'ถูกต้อง' })
+  assert.equal(right?.kind, 'answer')
+  assert.equal(right?.confidence, 0.39)
+})
+
+test('"แต่ว่า…" spoken over the next question is added to the answer just given', async () => {
+  const { refineUnderstanding } = await import('../src/understand.ts')
+  const previous = { question: 'ข้อหนึ่ง', answer: 'yes (confirmed aloud: "ใช่ค่ะ")' }
+  const yes: Understanding = { kind: 'answer', answer: 'yes', echo: 'ใช่ค่ะ' }
+  assert.equal(refineUnderstanding(yes, { question: 'ข้อสอง', heard: 'แต่ว่าต้องเตือนก่อนลบ', previous, cutInAfterMs: 1200 })?.kind, 'addition')
+  assert.equal(refineUnderstanding(yes, { question: 'ข้อสอง', heard: 'เอ่อ แล้วก็ต้องมี log ด้วย', previous, cutInAfterMs: 2500 })?.kind, 'addition')
+  // Later in the question, or not carrying on: as before.
+  assert.equal(refineUnderstanding(yes, { question: 'ข้อสอง', heard: 'แต่ว่าต้องเตือนก่อนลบ', previous, cutInAfterMs: 5000 })?.kind, 'answer')
+  assert.equal(refineUnderstanding(yes, { question: 'ข้อสอง', heard: 'ใช้ได้', previous, cutInAfterMs: 1200 })?.kind, 'repeat')
+
+  const { provider, audio, session } = setup()
+  provider.understandWith = r => (/^ใช้ได้/.test(r.heard) ? { kind: 'answer', answer: 'yes', echo: 'ใช่ค่ะ' } : { kind: 'answer', answer: r.heard, echo: '' })
+  const round = session.interview(['ข้อหนึ่ง ใช้ได้ไหมคะ', 'ข้อสอง ใช้ได้ไหมคะ'], 5000)
+  await hearNext(provider, audio, 'ใช้ได้')
+  // The second question starts; they carry on about the first over it.
+  await until(() => provider.said.some(t => t.includes('ข้อสอง')))
+  const q2 = `s${provider.said.findIndex(t => t.includes('ข้อสอง')) + 1}`
+  provider.emit({ type: 'speech.audio', speechId: q2, pcm: Buffer.alloc(4800) })
+  provider.utter('แต่ว่าต้องเตือนก่อนลบ', 'more')
+  // Acknowledged, and the second question is asked again.
+  await until(() => provider.said.filter(t => t.includes('ข้อสอง')).length >= 2)
+  await hearNext(provider, audio, 'ใช้ได้')
+  const r = await round
+  assert.equal(r.answers.length, 2)
+  assert.equal(r.answers[0]?.answer, 'ใช้ได้ แต่ว่าต้องเตือนก่อนลบ')
+  assert.equal(r.answers[0]?.understood?.answer, 'yes, with a condition: ใช้ได้ แต่ว่าต้องเตือนก่อนลบ')
+  assert.equal(r.answers[1]?.answer, 'ใช้ได้')
 })

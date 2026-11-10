@@ -40792,8 +40792,20 @@ function answerMass(k) {
 var LONG_REPLY_CHARS = 50;
 var isLong = (heard) => heard.replace(/\s/g, "").length >= LONG_REPLY_CHARS;
 var QUESTION_AGAIN = /คำถาม\S{0,10}?(ใหม่|อีก|หน่อย)|ทวน|ถามใหม่|ถามอีกที|อ่านใหม่|พูดใหม่/;
+var QUESTION_WORD = /อะไร|ยังไง|อย่างไร|ทำไม|หมายถึง|หมายความว่า|แปลว่า|ใคร|ที่ไหน|เมื่อไหร่|เมื่อไร|กี่|ไหม|มั้ย|หรือเปล่า|รึเปล่า|หรือไม่|เหรอ|หรอ(?!ก)|\?/;
+var ANSWER_ANYWAY = /(อะไร|ยังไง|ใคร|ที่ไหน|เมื่อไหร่|แบบไหน)ก็ได้/;
+var PURE_REPEAT = /^(เมื่อกี้)?(พูด|ถาม)?(ว่า)?(อะไร(นะ)?|ไงนะ|ว่าไงนะ|หา|ห๊ะ|ฮะ)\s*(ครับ|คะ|ค่ะ)?\s*\??$/;
+function asksBack(heard) {
+  const t = heard.trim();
+  return QUESTION_WORD.test(t) && !ANSWER_ANYWAY.test(t) && !PURE_REPEAT.test(t) && !QUESTION_AGAIN.test(t);
+}
 var HEDGE = /แต่|แค่|ยกเว้น|เว้นแต่|นอกจาก|\bbut\b|\bexcept\b/i;
 function readDecisions(answers, r, minConfidence = MIN_ANSWER_CONFIDENCE) {
+  const u = readKind(answers, r, minConfidence);
+  const confidence = answers.find((a) => a.name === "kind" && a.type === "choice")?.confidence;
+  return u && typeof confidence === "number" ? { ...u, confidence } : u;
+}
+function readKind(answers, r, minConfidence) {
   const k = answers.find((a) => a.name === "kind" && a.type === "choice");
   const kind = k?.choice;
   if (typeof kind !== "string") return void 0;
@@ -40804,6 +40816,9 @@ function readDecisions(answers, r, minConfidence = MIN_ANSWER_CONFIDENCE) {
   const lowConfidence = unsureKind && !surelyAnswer;
   if (r.review) return readReview(kind, answers, r, lowConfidence);
   const yesOrNo = YES_NO_START.test(heard);
+  if (!yesOrNo && ["yes", "no", "choice", "free_answer", "repeat", "comment"].includes(kind) && asksBack(heard)) {
+    return { kind: "question", answer: r.heard.trim(), echo: "" };
+  }
   if ((unsureKind || kind === "unclear") && kind !== "repeat" && !yesOrNo && !isLong(heard) && QUESTION_AGAIN.test(heard)) return { kind: "repeat", answer: "", echo: "" };
   const unsure = lowConfidence && !yesOrNo;
   if (unsure && ANSWER_KINDS.has(kind) || kind === "unclear") {
@@ -40835,13 +40850,16 @@ function readDecisions(answers, r, minConfidence = MIN_ANSWER_CONFIDENCE) {
       return void 0;
   }
 }
-var YES_NO_START = /^(?:บอกว่า|คิดว่า|ก็)?\s*(?:ไม่ใช่|ใช้ไม่ได้|ไม่ได้|ไม่เอา|ไม่ถูก|ใช้ได้|ใช่ได้|ได้เลย|ใช่|ได้|โอเค|ok|okay|ไม่|เอา|ถูก|yes|no)(?=$|[^ก-๙]|ค่ะ|คะ|ครับ|ๆ|นะ|แต่|แค่|เลย)/i;
+var YES_NO_START = /^(?:บอกว่า|คิดว่า|ก็)?\s*(?:ไม่ใช่|ใช้ไม่ได้|ไม่ได้|ไม่เอา|ไม่ถูกต้อง|ไม่ถูก|ไม่เห็นด้วย|ใช้ได้|ใช่ได้|ได้เลย|ถูกต้อง|ตกลง|เห็นด้วย|ใช่|ได้|โอเค|ok|okay|ไม่|เอา|ถูก|yes|no)(?=$|[^ก-๙]|ค่ะ|คะ|ครับ|ๆ|นะ|แต่|แค่|เลย)/i;
 var BACK = /เมื่อกี้|เมื่อกี๊|ข้อที่แล้ว|ข้อก่อน|ข้อเมื่อกี้|ฟังผิด|ได้ยินผิด|ย้อนกลับ|ย้อนไป|กลับไปข้อ|แก้ข้อ|แก้คำตอบ|เปลี่ยนคำตอบ|previous|go back/i;
 var EARLY_CUT_IN_MS = 1500;
+var ADDITION_WINDOW_MS = 3e3;
+var CONTINUES = /^(?:เอ่อ+|อ่า+|อ้อ|อ๋อ)?\s*(?:แต่|แค่|ยกเว้น|เว้นแต่|และ|แล้วก็|เพราะ|ถ้า|อีกอย่าง|อีกเรื่อง|เพิ่มเติม|ขอเพิ่ม|นอกจากนี้|ทั้งนี้|but\b|and\b|except\b|also\b|plus\b)/i;
 function refineUnderstanding(u, r) {
   if (!r.previous) return u;
   const heard = r.heard.trim();
   if (BACK.test(heard)) return { kind: "correction", answer: heard, echo: "" };
+  if (r.cutInAfterMs !== void 0 && r.cutInAfterMs < ADDITION_WINDOW_MS && CONTINUES.test(heard)) return { kind: "addition", answer: heard, echo: "" };
   if (u && r.cutInAfterMs !== void 0 && r.cutInAfterMs < EARLY_CUT_IN_MS) {
     if (u.kind === "answer" && /^no\b/.test(u.answer)) return { kind: "correction", answer: heard, echo: "" };
     if (u.kind === "answer" && /^yes\b/.test(u.answer)) return { kind: "repeat", answer: "", echo: "" };
@@ -41594,6 +41612,19 @@ var VoiceSession = class {
         round2.answers[next] = { question, status, answer: "", interrupted: false, repeats, ...said.pausedMs !== void 0 ? { pausedMs: said.pausedMs } : {} };
         return finish();
       }
+      const added = understood?.kind === "addition" && lastDone !== void 0 ? round2.answers[lastDone] : void 0;
+      if (added && added.status === "replied" && lastDone !== void 0) {
+        const text2 = `${added.answer} ${reply.text}`.trim();
+        const wasYes = added.understood?.kind === "answer" && /^yes\b/.test(added.understood.answer);
+        const merged = { ...added, answer: text2, understood: { kind: "answer", answer: wasYes ? `yes, with a condition: ${text2}` : text2, echo: "" } };
+        round2.answers[lastDone] = merged;
+        this.lastAnswer = { question: merged.question, answer: describeTaken(merged) };
+        this.deps.log?.timing({ what: "addition", to: lastDone + 1, heard: reply.text });
+        this.changed();
+        this.acknowledge();
+        jumpTo = next;
+        continue;
+      }
       if (understood?.kind === "correction" && lastDone !== void 0 && corrections < MAX_CORRECTIONS) {
         corrections++;
         this.deps.log?.timing({ what: "correction", from: next + 1, to: lastDone + 1, heard: reply.text });
@@ -42236,7 +42267,15 @@ var VoiceSession = class {
       ...cutInAfterMs !== void 0 ? { cutInAfterMs } : {}
     };
     const understood = refineUnderstanding(await provider.understand(request, signal), request);
-    this.deps.log?.timing({ what: "understood", ms: this.now() - started, kind: understood?.kind ?? "none", heard, answer: understood?.answer ?? "" });
+    this.deps.log?.timing({
+      what: "understood",
+      ms: this.now() - started,
+      kind: understood?.kind ?? "none",
+      heard,
+      answer: understood?.answer ?? "",
+      ...understood?.confidence !== void 0 ? { confidence: Math.round(understood.confidence * 100) / 100 } : {},
+      ...cutInAfterMs !== void 0 ? { cutInAfterMs } : {}
+    });
     return understood;
   }
   clipFor(text2) {
@@ -42498,6 +42537,8 @@ var describeUnderstood = (u) => {
       return "Still not clear after asking again (noise or garbled speech): ask it differently, or confirm what you think they meant.";
     case "repeat":
       return "They kept asking to hear it again: ask it shorter and simpler.";
+    case "addition":
+      return `They added to their previous answer, speaking over this question: "${u.answer}". Add it to that answer in your notes, then ask this question again.`;
     case "correction":
       return `They say their previous answer was heard wrong (${u.answer}). Say "\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E01\u0E35\u0E49\u0E19\u0E48\u0E32\u0E08\u0E30\u0E1F\u0E31\u0E07\u0E1C\u0E34\u0E14\u0E04\u0E48\u0E30", ask that previous question again, fix it in your notes, then come back to this one.`;
   }

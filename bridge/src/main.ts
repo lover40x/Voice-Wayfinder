@@ -119,6 +119,8 @@ const describeUnderstood = (u?: Understanding) => {
       return 'Still not clear after asking again (noise or garbled speech): ask it differently, or confirm what you think they meant.'
     case 'repeat':
       return 'They kept asking to hear it again: ask it shorter and simpler.'
+    case 'addition':
+      return `They added to their previous answer, speaking over this question: "${u.answer}". Add it to that answer in your notes, then ask this question again.`
     case 'correction':
       return `They say their previous answer was heard wrong (${u.answer}). Say "เมื่อกี้น่าจะฟังผิดค่ะ", ask that previous question again, fix it in your notes, then come back to this one.`
   }

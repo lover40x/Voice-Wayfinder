@@ -449,6 +449,21 @@ export class VoiceSession {
         round.answers[next] = { question, status, answer: '', interrupted: false, repeats, ...(said.pausedMs !== undefined ? { pausedMs: said.pausedMs } : {}) }
         return finish()
       }
+      // "แต่ว่า…" right after the confirmation: it belongs to the answer just given.
+      // Add it there, acknowledge, and ask this question again.
+      const added = understood?.kind === 'addition' && lastDone !== undefined ? round.answers[lastDone] : undefined
+      if (added && added.status === 'replied' && lastDone !== undefined) {
+        const text = `${added.answer} ${reply.text}`.trim()
+        const wasYes = added.understood?.kind === 'answer' && /^yes\b/.test(added.understood.answer)
+        const merged: InterviewAnswer = { ...added, answer: text, understood: { kind: 'answer', answer: wasYes ? `yes, with a condition: ${text}` : text, echo: '' } }
+        round.answers[lastDone] = merged
+        this.lastAnswer = { question: merged.question, answer: describeTaken(merged) }
+        this.deps.log?.timing({ what: 'addition', to: lastDone + 1, heard: reply.text })
+        this.changed()
+        this.acknowledge()
+        jumpTo = next
+        continue
+      }
       // "That was wrong": say so, drop the earlier answer and ask that question again.
       if (understood?.kind === 'correction' && lastDone !== undefined && corrections < MAX_CORRECTIONS) {
         corrections++
@@ -1160,7 +1175,15 @@ export class VoiceSession {
       ...(cutInAfterMs !== undefined ? { cutInAfterMs } : {}),
     }
     const understood = refineUnderstanding(await provider.understand(request, signal), request)
-    this.deps.log?.timing({ what: 'understood', ms: this.now() - started, kind: understood?.kind ?? 'none', heard, answer: understood?.answer ?? '' })
+    this.deps.log?.timing({
+      what: 'understood',
+      ms: this.now() - started,
+      kind: understood?.kind ?? 'none',
+      heard,
+      answer: understood?.answer ?? '',
+      ...(understood?.confidence !== undefined ? { confidence: Math.round(understood.confidence * 100) / 100 } : {}),
+      ...(cutInAfterMs !== undefined ? { cutInAfterMs } : {}),
+    })
     return understood
   }
 

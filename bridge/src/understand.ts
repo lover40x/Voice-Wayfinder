@@ -4,8 +4,11 @@
 // Claude still makes every decision; this only keeps a round from moving on
 // over a cough, a flush, or a misheard word.
 
-/** `keep` and `change` answer a read-back of an earlier answer (`review`). */
-export type UnderstandingKind = 'answer' | 'unclear' | 'repeat' | 'question' | 'comment' | 'correction' | 'keep' | 'change'
+/**
+ * `keep` and `change` answer a read-back of an earlier answer (`review`);
+ * `addition` adds to the answer just given ("แต่ว่า…" spoken over the next question).
+ */
+export type UnderstandingKind = 'answer' | 'unclear' | 'repeat' | 'question' | 'comment' | 'correction' | 'keep' | 'change' | 'addition'
 
 export type Understanding = {
   kind: UnderstandingKind
@@ -13,6 +16,8 @@ export type Understanding = {
   answer: string
   /** A short Thai confirmation spoken before the next question ("ข้อสองนะคะ"); empty for none. */
   echo: string
+  /** How sure the model was of the kind (Decisions API), for the log. */
+  confidence?: number
 }
 
 export type UnderstandRequest = {
@@ -258,15 +263,37 @@ const isLong = (heard: string) => heard.replace(/\s/g, '').length >= LONG_REPLY_
  */
 const QUESTION_AGAIN = /คำถาม\S{0,10}?(ใหม่|อีก|หน่อย)|ทวน|ถามใหม่|ถามอีกที|อ่านใหม่|พูดใหม่/
 
+/**
+ * Asking something back ("จะให้แจ้งมาทำอะไรนะ", "ทำไมต้องมี…ด้วยนะ",
+ * "อันนี้คือยังไง"): Luna read these live as yes, repeat or comment, and the
+ * round moved on with "ใช่ค่ะ". Not "อะไรก็ได้" (an answer), not a bare
+ * "ว่าอะไรนะ" (asking to hear it again).
+ */
+const QUESTION_WORD = /อะไร|ยังไง|อย่างไร|ทำไม|หมายถึง|หมายความว่า|แปลว่า|ใคร|ที่ไหน|เมื่อไหร่|เมื่อไร|กี่|ไหม|มั้ย|หรือเปล่า|รึเปล่า|หรือไม่|เหรอ|หรอ(?!ก)|\?/
+const ANSWER_ANYWAY = /(อะไร|ยังไง|ใคร|ที่ไหน|เมื่อไหร่|แบบไหน)ก็ได้/
+const PURE_REPEAT = /^(เมื่อกี้)?(พูด|ถาม)?(ว่า)?(อะไร(นะ)?|ไงนะ|ว่าไงนะ|หา|ห๊ะ|ฮะ)\s*(ครับ|คะ|ค่ะ)?\s*\??$/
+
+/** True when the reply asks something back rather than answering. */
+export function asksBack(heard: string): boolean {
+  const t = heard.trim()
+  return QUESTION_WORD.test(t) && !ANSWER_ANYWAY.test(t) && !PURE_REPEAT.test(t) && !QUESTION_AGAIN.test(t)
+}
+
 /** "ใช้ได้ แต่ว่า…": a yes that sets a condition. */
 const HEDGE = /แต่|แค่|ยกเว้น|เว้นแต่|นอกจาก|\bbut\b|\bexcept\b/i
 
-/** Turns the typed answers into an Understanding, with a fixed confirmation phrase. */
+/** Turns the typed answers into an Understanding, with a fixed confirmation phrase and the model's confidence. */
 export function readDecisions(
   answers: readonly DecisionAnswer[],
   r: UnderstandRequest & { questionNo?: number },
   minConfidence = MIN_ANSWER_CONFIDENCE,
 ): Understanding | undefined {
+  const u = readKind(answers, r, minConfidence)
+  const confidence = answers.find(a => a.name === 'kind' && a.type === 'choice')?.confidence
+  return u && typeof confidence === 'number' ? { ...u, confidence } : u
+}
+
+function readKind(answers: readonly DecisionAnswer[], r: UnderstandRequest & { questionNo?: number }, minConfidence: number): Understanding | undefined {
   const k = answers.find(a => a.name === 'kind' && a.type === 'choice')
   const kind = k?.choice
   if (typeof kind !== 'string') return undefined
@@ -279,6 +306,10 @@ export function readDecisions(
   const lowConfidence = unsureKind && !surelyAnswer
   if (r.review) return readReview(kind, answers, r, lowConfidence)
   const yesOrNo = YES_NO_START.test(heard)
+  // Asked back, whatever kind the model guessed: Claude answers before the round goes on.
+  if (!yesOrNo && ['yes', 'no', 'choice', 'free_answer', 'repeat', 'comment'].includes(kind) && asksBack(heard)) {
+    return { kind: 'question', answer: r.heard.trim(), echo: '' }
+  }
   // "ทวนคำถาม…" misheard reads as an unsure answer: it asks for the question again.
   if ((unsureKind || kind === 'unclear') && kind !== 'repeat' && !yesOrNo && !isLong(heard) && QUESTION_AGAIN.test(heard)) return { kind: 'repeat', answer: '', echo: '' }
   // Noise reads as a low-confidence answer; a reply that opens with a plain yes or no is kept.
@@ -322,11 +353,15 @@ export function readDecisions(
  * model is: "ใช่", "ใช้ได้ แต่ว่า…", "คิดว่าใช้ได้", "บอกว่าไม่เอา".
  */
 const YES_NO_START =
-  /^(?:บอกว่า|คิดว่า|ก็)?\s*(?:ไม่ใช่|ใช้ไม่ได้|ไม่ได้|ไม่เอา|ไม่ถูก|ใช้ได้|ใช่ได้|ได้เลย|ใช่|ได้|โอเค|ok|okay|ไม่|เอา|ถูก|yes|no)(?=$|[^ก-๙]|ค่ะ|คะ|ครับ|ๆ|นะ|แต่|แค่|เลย)/i
+  /^(?:บอกว่า|คิดว่า|ก็)?\s*(?:ไม่ใช่|ใช้ไม่ได้|ไม่ได้|ไม่เอา|ไม่ถูกต้อง|ไม่ถูก|ไม่เห็นด้วย|ใช้ได้|ใช่ได้|ได้เลย|ถูกต้อง|ตกลง|เห็นด้วย|ใช่|ได้|โอเค|ok|okay|ไม่|เอา|ถูก|yes|no)(?=$|[^ก-๙]|ค่ะ|คะ|ครับ|ๆ|นะ|แต่|แค่|เลย)/i
 /** Words that point back at the previous answer. */
 const BACK = /เมื่อกี้|เมื่อกี๊|ข้อที่แล้ว|ข้อก่อน|ข้อเมื่อกี้|ฟังผิด|ได้ยินผิด|ย้อนกลับ|ย้อนไป|กลับไปข้อ|แก้ข้อ|แก้คำตอบ|เปลี่ยนคำตอบ|previous|go back/i
 /** Spoken over the very start of a question: they cannot have heard it yet. */
 const EARLY_CUT_IN_MS = 1500
+/** Spoken over the start of a question with "แต่…", "แล้วก็…": still talking about the last one. */
+const ADDITION_WINDOW_MS = 3000
+/** Words that carry on the answer just given rather than start a new one. */
+const CONTINUES = /^(?:เอ่อ+|อ่า+|อ้อ|อ๋อ)?\s*(?:แต่|แค่|ยกเว้น|เว้นแต่|และ|แล้วก็|เพราะ|ถ้า|อีกอย่าง|อีกเรื่อง|เพิ่มเติม|ขอเพิ่ม|นอกจากนี้|ทั้งนี้|but\b|and\b|except\b|also\b|plus\b)/i
 
 /**
  * Adjusts what the model read, using what it cannot weigh well: words that
@@ -337,6 +372,8 @@ export function refineUnderstanding(u: Understanding | undefined, r: UnderstandR
   if (!r.previous) return u
   const heard = r.heard.trim()
   if (BACK.test(heard)) return { kind: 'correction', answer: heard, echo: '' }
+  // "แต่ว่า…" over the start of the next question: more about the last answer.
+  if (r.cutInAfterMs !== undefined && r.cutInAfterMs < ADDITION_WINDOW_MS && CONTINUES.test(heard)) return { kind: 'addition', answer: heard, echo: '' }
   if (u && r.cutInAfterMs !== undefined && r.cutInAfterMs < EARLY_CUT_IN_MS) {
     if (u.kind === 'answer' && /^no\b/.test(u.answer)) return { kind: 'correction', answer: heard, echo: '' }
     // A quick "yes" agrees with the last confirmation: ask this question again.
